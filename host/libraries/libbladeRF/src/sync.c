@@ -222,14 +222,27 @@ int sync_rx(struct bladerf *dev, void *samples, unsigned num_samples,
 {
     struct bladerf_sync *s = dev->sync[BLADERF_MODULE_RX];
     struct buffer_mgmt *b;
+    struct bladerf_meta_header *meta_header;
 
     int status = 0;
     unsigned int samples_returned = 0;
     uint8_t *samples_dest = (uint8_t*)samples;
+    size_t pkt_sz;
+    size_t pkt_data_sz;
     uint8_t *buf_src;
     unsigned int samples_to_copy;
     unsigned int samples_per_buffer;
+    timestamp cur_time, pkt_time;
+    int last_time_valid;
+    int found_timestamp_pkt;
+    int delta_bytes;
 
+    last_time_valid = 0;
+    found_timestamp_pkt = 0;
+
+    pkt_sz = (dev->usb_speed == BLADERF_DEVICE_SPEED_SUPER) ? sizeof(struct bladerf_superspeed_timestamp)
+                                : sizeof(struct bladerf_highspeed_timestamp);
+    pkt_data_sz = pkt_sz - sizeof(struct bladerf_meta_header);
     if (s == NULL || samples == NULL) {
         return BLADERF_ERR_INVAL;
     }
@@ -323,6 +336,7 @@ int sync_rx(struct bladerf *dev, void *samples, unsigned num_samples,
                 MUTEX_LOCK(&b->lock);
                 b->status[b->cons_i] = SYNC_BUFFER_PARTIAL;
                 b->partial_off = 0;
+                b->time_adv = 0;
                 MUTEX_UNLOCK(&b->lock);
 
                 s->state= SYNC_STATE_USING_BUFFER;
@@ -333,15 +347,85 @@ int sync_rx(struct bladerf *dev, void *samples, unsigned num_samples,
 
                 buf_src = (uint8_t*)b->buffers[b->cons_i];
 
+                // if we are at the beginning of a "packet"
+                // skip the first 16 bytes, and reset the packet "time pointer"
+                if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) {
+                    if ((b->partial_off % (pkt_sz/4)) == 0) {
+                        b->partial_off += sizeof(struct bladerf_meta_header)/4;
+                        b->time_adv = 0;
+                    }
+
+                    meta_header = (struct bladerf_meta_header*)(buf_src + (samples2bytes(s, b->partial_off) & ~(pkt_sz - 1)));
+                    pkt_time = ((((uint64_t)meta_header->time_hi) << 32) | meta_header->time_lo);
+
+                    // the caller wants samples from a specific time
+                    if (metadata && metadata->timestamp && !found_timestamp_pkt) {
+                        // if the time has passed return an error
+                        if (metadata->timestamp < pkt_time) {
+                            status = BLADERF_ERR_RANGE;
+                            goto unlock_buffer;
+                        }
+
+                        if (metadata->timestamp < pkt_time + pkt_data_sz/2) {
+                            // the beginning of the desired time is within this packet
+                            b->time_adv = (metadata->timestamp - pkt_time)/2;
+                            b->partial_off = (b->partial_off & ~(pkt_sz/4 - 1)) + 4 + b->time_adv;
+                        } else {
+                            // the timestamp is not within this packet so discard the current packet
+                            b->partial_off += (pkt_sz - (samples2bytes(s, b->partial_off) & (pkt_sz - 1)))/4;
+                            goto discard_buffer;
+                        }
+                        // this is the first packet we care about when copying so mark it as the last packet time
+                        b->last_pkt_time = pkt_time;
+                    }
+                    cur_time = pkt_time + b->time_adv * 2;
+
+                    // return the time offset to the caller
+                    if (!last_time_valid) {
+                        if (metadata)
+                            metadata->timestamp = cur_time;
+                        last_time_valid = 1;
+                    }
+
+                    // detect any mising packets, report errors only once copying has started
+                    if (b->last_pkt_time) {
+                        if (b->last_pkt_time != pkt_time && (b->last_pkt_time + pkt_data_sz/2) != pkt_time) {
+                            samples_to_copy = uint_min(num_samples - samples_returned,
+                                    samples_per_buffer - b->partial_off);
+                            memset(samples_dest + samples2bytes(s, samples_returned), 0,
+                                    samples2bytes(s, num_samples - samples_returned));
+                            b->last_pkt_time = pkt_time;
+                            status = BLADERF_ERR_RANGE;
+                            goto partly_consume_buffer;
+                        }
+                    }
+
+                    b->last_pkt_time = pkt_time;
+                    found_timestamp_pkt = 1;
+                    if (metadata) {
+                        metadata->flags = meta_header->flags;
+                        metadata->status = 0;
+                    }
+                }
+
                 samples_to_copy = uint_min(num_samples - samples_returned,
                                            samples_per_buffer - b->partial_off);
+
+                delta_bytes = samples2bytes(s, b->partial_off) % pkt_sz;
+                if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META &&
+                        delta_bytes + samples_to_copy*4 > pkt_sz) {
+                    samples_to_copy = pkt_sz/4 - (b->partial_off%(pkt_sz/4));
+                }
 
                 memcpy(samples_dest + samples2bytes(s, samples_returned),
                        buf_src + samples2bytes(s, b->partial_off),
                        samples2bytes(s, samples_to_copy));
 
+partly_consume_buffer:
+                b->time_adv += samples_to_copy;
                 b->partial_off += samples_to_copy;
                 samples_returned += samples_to_copy;
+discard_buffer:
 
                 log_verbose("%s: Provided %u samples to caller\n",
                             __FUNCTION__, samples_to_copy);
@@ -362,6 +446,7 @@ int sync_rx(struct bladerf *dev, void *samples, unsigned num_samples,
                     s->state = SYNC_STATE_WAIT_FOR_BUFFER;
                 }
 
+unlock_buffer:
                 MUTEX_UNLOCK(&b->lock);
                 break;
         }
