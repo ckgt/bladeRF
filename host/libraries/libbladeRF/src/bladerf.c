@@ -466,7 +466,6 @@ int bladerf_get_txvga1(struct bladerf *dev, int *gain)
     return status;
 }
 
-
 int bladerf_set_lna_gain(struct bladerf *dev, bladerf_lna_gain gain)
 {
     int status;
@@ -542,6 +541,49 @@ int bladerf_set_gain(struct bladerf *dev, bladerf_module mod, int gain) {
 
     MUTEX_UNLOCK(&dev->ctrl_lock);
     return status;
+}
+
+int bladerf_set_rx_gain_combo(struct bladerf *dev, bladerf_lna_gain lnagain, int rxvga1, int rxvga2)
+{
+    int status;
+    status = bladerf_set_lna_gain(dev, lnagain);
+    if (status < 0)
+        return status;
+
+    status = bladerf_set_rxvga1(dev, rxvga1);
+    if (status < 0)
+        return status;
+
+    return bladerf_set_rxvga2(dev, rxvga2);
+}
+
+int bladerf_set_rx_gain(struct bladerf *dev, int gain)
+{
+    if (gain <= BLADERF_LNA_GAIN_MID_DB) {
+        return bladerf_set_rx_gain_combo(dev,
+                BLADERF_LNA_GAIN_BYPASS,
+                BLADERF_RXVGA1_GAIN_MIN,
+                BLADERF_RXVGA2_GAIN_MIN);
+    } else if (gain <= BLADERF_LNA_GAIN_MID_DB + BLADERF_RXVGA1_GAIN_MIN) {
+        return bladerf_set_rx_gain_combo(dev,
+                BLADERF_LNA_GAIN_MID_DB,
+                BLADERF_RXVGA1_GAIN_MIN,
+                BLADERF_RXVGA2_GAIN_MIN);
+    } else if (gain <= (BLADERF_LNA_GAIN_MAX_DB + BLADERF_RXVGA1_GAIN_MAX)) {
+        return bladerf_set_rx_gain_combo(dev,
+                BLADERF_LNA_GAIN_MID,
+                gain - BLADERF_LNA_GAIN_MID_DB,
+                BLADERF_RXVGA2_GAIN_MIN);
+    } else if (gain < (BLADERF_LNA_GAIN_MAX_DB + BLADERF_RXVGA1_GAIN_MAX + BLADERF_RXVGA2_GAIN_MAX)) {
+        return bladerf_set_rx_gain_combo(dev,
+                BLADERF_LNA_GAIN_MAX,
+                BLADERF_RXVGA1_GAIN_MAX,
+                gain - (BLADERF_LNA_GAIN_MAX_DB + BLADERF_RXVGA1_GAIN_MAX));
+    }
+    return bladerf_set_rx_gain_combo(dev,
+            BLADERF_LNA_GAIN_MAX,
+            BLADERF_RXVGA1_GAIN_MAX,
+            BLADERF_RXVGA2_GAIN_MAX);
 }
 
 int bladerf_set_bandwidth(struct bladerf *dev, bladerf_module module,

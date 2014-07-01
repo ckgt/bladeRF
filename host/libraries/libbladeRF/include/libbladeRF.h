@@ -935,13 +935,13 @@ int CALL_CONV bladerf_get_rxvga2(struct bladerf *dev, int *gain);
  * for a requested amount of TX gain
  *
  * @param       dev         Device handle
- * @param       mod         Module
+ * @param       m           Module to configure
  * @param       gain        Desired gain
  *
  * @return 0 on success, value from \ref RETCODES list on failure
  */
 API_EXPORT
-int CALL_CONV bladerf_set_gain(struct bladerf *dev, bladerf_module mod, int gain);
+int CALL_CONV bladerf_set_gain(struct bladerf *dev, bladerf_module m, int gain);
 
 /**
  * Set the bandwidth of the LMS LPF to specified value in Hz

@@ -460,13 +460,18 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
 {
     struct bladerf_sync *s = dev->sync[BLADERF_MODULE_TX];
     struct buffer_mgmt *b;
+    struct bladerf_meta_header *meta_header;
 
     int status = 0;
     unsigned int samples_written = 0;
     unsigned int samples_to_copy;
     unsigned int samples_per_buffer;
+    unsigned int time_adv_difference;
     uint8_t *samples_src = (uint8_t*)samples;
     uint8_t *buf_dest;
+    size_t pkt_sz;
+    size_t pkt_data_sz;
+    unsigned int remaining_bytes;
 
     if (s == NULL || samples == NULL) {
         return BLADERF_ERR_INVAL;
@@ -474,6 +479,10 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
 
     b = &s->buf_mgmt;
     samples_per_buffer = s->stream_config.samples_per_buffer;
+
+    pkt_sz = (dev->usb_speed == BLADERF_DEVICE_SPEED_SUPER) ? sizeof(struct bladerf_superspeed_timestamp)
+                                : sizeof(struct bladerf_highspeed_timestamp);
+    pkt_data_sz = pkt_sz - sizeof(struct bladerf_meta_header);
 
     while (status == 0 && samples_written < num_samples) {
 
@@ -544,15 +553,61 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                 MUTEX_LOCK(&b->lock);
 
                 buf_dest = (uint8_t*)b->buffers[b->prod_i];
+
                 samples_to_copy = uint_min(num_samples - samples_written,
                                            samples_per_buffer - b->partial_off);
+
+                if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) {
+                    meta_header = (struct bladerf_meta_header*)(buf_dest + (samples2bytes(s, b->partial_off) & ~(pkt_sz - 1)));
+                    if ((b->partial_off % (pkt_sz/4)) == 0) {
+
+                        if (metadata && metadata->timestamp) {
+                            b->last_pkt_time = metadata->timestamp + samples_written * 2;
+                        } else {
+                            b->last_pkt_time += pkt_data_sz / 2;
+                        }
+                        meta_header->flags = -1;
+                        meta_header->rsvd = 0;
+                        meta_header->time_lo = b->last_pkt_time & 0xffffffff;
+                        meta_header->time_hi = (b->last_pkt_time >> 32) & 0xffffffff;
+                        b->partial_off += sizeof(struct bladerf_meta_header)/4;
+                        b->time_adv = 0;
+                    } else {
+                        if (metadata && metadata->timestamp) {
+                            // the caller wants to submit samples that are out of the current packet's bounds
+                            // so 0 out the remainder of the payload and submit the current packet
+                            if (metadata->timestamp >= b->last_pkt_time + (pkt_data_sz/2)) {
+                                samples_to_copy = pkt_sz/4 - b->partial_off%(pkt_sz/4);
+                                memset(buf_dest + samples2bytes(s, b->partial_off), 0,
+                                        samples2bytes(s, samples_to_copy));
+                                goto submit_packet;
+                            }
+                        }
+                        // the caller wants to submit samples that fall within this packet's bounds
+                        // 0 out any gap that might exist within this packet, and advance pointers
+                        if (metadata && metadata->timestamp != b->time_adv + b->last_pkt_time) {
+                            time_adv_difference = metadata->timestamp - (b->time_adv + b->last_pkt_time);
+                            b->time_adv += time_adv_difference;
+                            b->partial_off += time_adv_difference * 2;
+                            memset(buf_dest + samples2bytes(s, b->partial_off), 0,
+                                    samples2bytes(s, time_adv_difference/2));
+                            assert(b->partial_off % (pkt_sz/4));
+                        }
+                    }
+                    remaining_bytes = (pkt_sz - ((b->partial_off * 4) % pkt_sz) );
+                    if (samples_to_copy > remaining_bytes/4) {
+                        samples_to_copy = remaining_bytes/4;
+                    }
+                }
 
                 memcpy(buf_dest + samples2bytes(s, b->partial_off),
                         samples_src + samples2bytes(s, samples_written),
                         samples2bytes(s, samples_to_copy));
 
-                b->partial_off += samples_to_copy;
                 samples_written += samples_to_copy;
+submit_packet:
+                b->time_adv += samples_to_copy * 2;
+                b->partial_off += samples_to_copy;
 
                 log_verbose("%s: Buffered %u samples from caller\n",
                             __FUNCTION__, samples_to_copy);
