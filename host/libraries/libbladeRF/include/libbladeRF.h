@@ -1165,6 +1165,19 @@ typedef enum {
                                *       2 * num_samples * sizeof(int16_t)
                                *  bytes large
                                */
+    BLADERF_FORMAT_SC16_Q11_META,   /**< Signed, Complex 16-bit Q11, with metadata parsing support
+                                      *  This is the native format of the DAC data.
+                                      *
+                                      *  Samples are interleaved IQ value pairs, where
+                                      *  each value in the pair is an int16_t. For each
+                                      *  value, the data in the lower bits. The upper
+                                      *  bits are reserved.
+                                      *
+                                      *  When using this format, note that buffers
+                                      *  must be at least
+                                      *       2 * num_samples * sizeof(int16_t)
+                                      *  bytes large
+                                      */
 } bladerf_format;
 
 /**

@@ -179,4 +179,24 @@ int load_calibration_table(struct bladerf *dev, const char *filename);
  */
 int config_gpio_write(struct bladerf *dev, uint32_t val);
 
+typedef uint64_t timestamp;
+
+struct bladerf_meta_header {
+    uint32_t rsvd;
+    struct {
+        uint32_t time_lo;
+        uint32_t time_hi;
+    };
+    uint32_t flags;
+};
+
+struct bladerf_superspeed_timestamp {
+    struct bladerf_meta_header header;
+    int16_t samples[512*2-8];
+};
+
+struct bladerf_highspeed_timestamp {
+    struct bladerf_meta_header header;
+    int16_t samples[256*2-8];
+};
 #endif

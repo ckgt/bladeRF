@@ -48,6 +48,7 @@ int sync_init(struct bladerf *dev,
 {
     struct bladerf_sync *sync;
     int status = 0;
+    unsigned int val;
     size_t i, bytes_per_sample;
 
     if (num_transfers >= num_buffers) {
@@ -55,6 +56,7 @@ int sync_init(struct bladerf *dev,
     }
 
     switch (format) {
+        case BLADERF_FORMAT_SC16_Q11_META:
         case BLADERF_FORMAT_SC16_Q11:
             bytes_per_sample = 4;
             break;
@@ -62,6 +64,20 @@ int sync_init(struct bladerf *dev,
         default:
             return BLADERF_ERR_INVAL;
     }
+
+    status = bladerf_config_gpio_read(dev, &val);
+    if (status)
+        return status;
+
+    if (format == BLADERF_FORMAT_SC16_Q11_META) {
+        val |= 0x10000;
+    } else {
+        val &= ~0x10000;
+    }
+
+    status = bladerf_config_gpio_write(dev, val);
+    if (status)
+        return status;
 
     /* bladeRF GPIF DMA requirement */
     if ((bytes_per_sample * buffer_size) % 4096 != 0) {
@@ -94,6 +110,7 @@ int sync_init(struct bladerf *dev,
     sync->dev = dev;
     sync->state = SYNC_STATE_CHECK_WORKER;
 
+    sync->buf_mgmt.last_pkt_time = 0;
     sync->buf_mgmt.num_buffers = num_buffers;
     sync->buf_mgmt.resubmit_count = 0;
 
