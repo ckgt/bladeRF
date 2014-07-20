@@ -192,8 +192,8 @@ CyU3PReturnStatus_t CyFxSpiTransfer(uint16_t pageAddress, uint16_t byteCount, ui
         buffer += FLASH_PAGE_SIZE;
         pageCount--;
 
-        if (!spiFastRead)
-            CyU3PThreadSleep(15);
+        //if (!spiFastRead)
+        //    CyU3PThreadSleep(15);
     }
 
     return CY_U3P_SUCCESS;
