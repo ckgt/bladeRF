@@ -56,6 +56,7 @@ struct buffer_mgmt {
     unsigned int prod_i;        /**< Producer index - next buffer to fill */
     unsigned int cons_i;        /**< Consumer index - next buffer to empty */
     unsigned int partial_off;   /**< Current index into partial buffer */
+    bool burst_mode;            /**< Identify if the module is in burst mode */
     unsigned int time_adv;      /**< Current time index into packet */
     unsigned long long last_pkt_time;   /**< Last recorded packet time */
 

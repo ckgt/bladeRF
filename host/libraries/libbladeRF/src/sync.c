@@ -465,6 +465,7 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
     int status = 0;
     unsigned int samples_written = 0;
     unsigned int samples_to_copy;
+    unsigned int samples_to_zero;
     unsigned int samples_per_buffer;
     unsigned int time_adv_difference;
     uint8_t *samples_src = (uint8_t*)samples;
@@ -472,11 +473,13 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
     size_t pkt_sz;
     size_t pkt_data_sz;
     unsigned int remaining_bytes;
+    bool end_current_buffer;
 
     if (s == NULL || samples == NULL) {
         return BLADERF_ERR_INVAL;
     }
 
+    end_current_buffer = false;
     b = &s->buf_mgmt;
     samples_per_buffer = s->stream_config.samples_per_buffer;
 
@@ -558,6 +561,31 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                                            samples_per_buffer - b->partial_off);
 
                 if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) {
+
+                    // do some accounting for burst mode
+
+                    if (b->burst_mode && metadata) {
+                        /* unexpected FLAG_BURST_START, FLAG_NOW, and
+                         * timestamps when burst mode is set are
+                         * considered errors */
+                        if ((metadata->flags & BLADERF_META_FLAG_BURST_START) ||
+                            (metadata->flags & BLADERF_META_FLAG_NOW) ||
+                            metadata->timestamp) {
+                            status = BLADERF_ERR_INVAL;
+                            goto leave_tx;
+                        }
+                    }
+                    /* we should not be receiving packets without metadata if burst
+                     * mode is not enabled */
+                    if (!b->burst_mode && !metadata) {
+                        status = BLADERF_ERR_INVAL;
+                        goto leave_tx;
+                    }
+                    // if we made it this far and BURST_START is set enable burst mode
+                    if (metadata && (metadata->flags & BLADERF_META_FLAG_BURST_START)) {
+                        b->burst_mode = true;
+                    }
+
                     meta_header = (struct bladerf_meta_header*)(buf_dest + (samples2bytes(s, b->partial_off) & ~(pkt_sz - 1)));
                     if ((b->partial_off % (pkt_sz/4)) == 0) {
 
@@ -577,9 +605,8 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                             // the caller wants to submit samples that are out of the current packet's bounds
                             // so 0 out the remainder of the payload and submit the current packet
                             if (metadata->timestamp >= b->last_pkt_time + (pkt_data_sz/2)) {
-                                samples_to_copy = pkt_sz/4 - b->partial_off%(pkt_sz/4);
-                                memset(buf_dest + samples2bytes(s, b->partial_off), 0,
-                                        samples2bytes(s, samples_to_copy));
+                                end_current_buffer = true;
+                                samples_to_copy = 0;
                                 goto submit_packet;
                             }
                         }
@@ -598,6 +625,8 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                     if (samples_to_copy > remaining_bytes/4) {
                         samples_to_copy = remaining_bytes/4;
                     }
+                } else {
+                    assert(!metadata);
                 }
 
                 memcpy(buf_dest + samples2bytes(s, b->partial_off),
@@ -606,6 +635,25 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
 
                 samples_written += samples_to_copy;
 submit_packet:
+                if ((s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) && metadata) {
+                    /* all of the error checking was done earlier, we can assume
+                     * the flags makes sense */
+                    if (metadata->flags & (BLADERF_META_FLAG_BURST_END | BLADERF_META_FLAG_NOW)) {
+                        if (samples_written == num_samples) {
+                            end_current_buffer = true;
+                            b->burst_mode = false;
+                        }
+                    }
+                }
+
+                if (end_current_buffer) {
+                    samples_to_zero = pkt_sz/4 - b->partial_off%(pkt_sz/4);
+                    memset(buf_dest + samples2bytes(s, b->partial_off),
+                        0, samples2bytes(s, samples_to_zero));
+                    samples_to_copy += samples_to_zero;
+                    end_current_buffer = false;
+                }
+
                 b->time_adv += samples_to_copy * 2;
                 b->partial_off += samples_to_copy;
 
@@ -651,8 +699,9 @@ submit_packet:
                     }
                 }
 
-                MUTEX_UNLOCK(&b->lock);
-                break;
+leave_tx:
+            MUTEX_UNLOCK(&b->lock);
+            break;
         }
     }
 

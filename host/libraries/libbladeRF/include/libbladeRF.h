@@ -1247,6 +1247,12 @@ typedef enum {
  */
 #define BLADERF_META_FLAG_BURST_END     (1 << 1)
 
+/**
+ * Mark the associated buffer as requiring immediate transfer, this currently
+ * only applies to TX
+ */
+#define BLADERF_META_FLAG_NOW           (1 << 2)
+
 
 /**
  * Sample metadata
