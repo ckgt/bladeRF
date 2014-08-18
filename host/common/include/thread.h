@@ -34,6 +34,7 @@
  */
 #include <pthread.h>
 #include "rel_assert.h"
+#include "log.h"
 
 #define MUTEX pthread_mutex_t
 
@@ -52,11 +53,13 @@
 
 #   define MUTEX_LOCK(m) do { \
         int status = pthread_mutex_lock(m); \
+        log_verbose("Acquired lock: " # m "\n"); \
         assert(status == 0 && "Mutex lock failure");\
     } while (0)
 
 #   define MUTEX_UNLOCK(m) do { \
         int status = pthread_mutex_unlock(m); \
+        log_verbose("Released lock: " # m "\n"); \
         assert(status == 0 && "Mutex unlock failure");\
     } while (0)
 
