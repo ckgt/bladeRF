@@ -34,6 +34,25 @@
 
 #define OPTSTR "hd:s:S:t:v:"
 
+
+#define DECLARE_TEST(name) \
+    extern int test_fn_##name(struct bladerf *, struct app_params *); \
+    const struct test test_##name = { #name, test_fn_##name }
+
+#define TEST(name) &test_##name
+
+struct test {
+    const char *name;
+    int (*run)(struct bladerf *dev, struct app_params *p);
+};
+
+DECLARE_TEST(rx_gaps);
+
+static const struct test *tests[] = {
+    TEST(rx_gaps),
+};
+
+
 static const struct option long_options[] = {
     { "help",       no_argument,        0,      'h' },
 
@@ -204,13 +223,12 @@ static inline int apply_params(struct bladerf *dev, struct app_params *p)
     return 0;
 }
 
-extern int test_rx_gaps(struct bladerf *dev, struct app_params *p);
-
 int main(int argc, char *argv[])
 {
     int status;
     struct app_params p;
     struct bladerf *dev = NULL;
+    size_t i;
 
     init_app_params(&p);
 
@@ -235,9 +253,13 @@ int main(int argc, char *argv[])
         goto out;
     }
 
-    if (!strcasecmp(p.test_name, "rx_gaps")) {
-        status = test_rx_gaps(dev, &p);
-    } else {
+    for (i = 0; i < ARRAY_SIZE(tests); i++) {
+        if (!strcasecmp(p.test_name, tests[i]->name)) {
+            status = tests[i]->run(dev, &p);
+        }
+    }
+
+    if (i >= ARRAY_SIZE(tests)) {
         fprintf(stderr, "Unknown test: %s\n", p.test_name);
         status = -1;
     }

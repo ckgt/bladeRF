@@ -31,7 +31,6 @@
 #include <stdbool.h>
 #include <inttypes.h>
 #include <libbladeRF.h>
-#include "rel_assert.h"
 #include "test_timestamps.h"
 
 /* TODO Make sync params configurable */
@@ -178,7 +177,7 @@ out:
     return status;
 }
 
-int test_rx_gaps(struct bladerf *dev, struct app_params *p)
+int test_fn_rx_gaps(struct bladerf *dev, struct app_params *p)
 {
     int status = 0;
     int16_t *samples;
