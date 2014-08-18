@@ -65,7 +65,7 @@ int sync_init(struct bladerf *dev,
             return BLADERF_ERR_INVAL;
     }
 
-    status = bladerf_config_gpio_read(dev, &val);
+    status = CONFIG_GPIO_READ(dev, &val);
     if (status)
         return status;
 
@@ -75,7 +75,7 @@ int sync_init(struct bladerf *dev,
         val &= ~0x10000;
     }
 
-    status = bladerf_config_gpio_write(dev, val);
+    status = CONFIG_GPIO_WRITE(dev, val);
     if (status)
         return status;
 
