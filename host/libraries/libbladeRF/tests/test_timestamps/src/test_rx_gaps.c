@@ -32,6 +32,7 @@
 #include <inttypes.h>
 #include <libbladeRF.h>
 #include "rel_assert.h"
+#include "test_timestamps.h"
 
 /* TODO Make sync params configurable */
 #define NUM_BUFFERS 16
@@ -39,22 +40,22 @@
 #define BUF_SIZE    (64 * 1024)
 #define TIMEOUT_MS  1000
 
+#define RANDOM_GAP_SIZE 0
+
 struct test_case {
     uint64_t gap;
     unsigned int iterations;
 };
+
 static const struct test_case tests[] = {
-#if 0
-    { 1,    10000000 },
-    { 2,    10000000 },
-    { 128,  10000000 },
-    { 256,  5000000 },
-    { 512,  5000000 },
-#endif
+    { 1,    2000000 },
+    { 2,    2000000 },
+    { 128,  75000 },
+    { 256,  50000 },
+    { 512,  50000 },
     { 1023, 10000 },
     { 1024, 10000 },
     { 1025, 10000 },
-#if 0
     { 2048, 5000 },
     { 3172, 5000 },
     { 4096, 2500 },
@@ -62,19 +63,18 @@ static const struct test_case tests[] = {
     { 16 * 1024, 1000 },
     { 32 * 1024, 1000 },
     { 64 * 1024, 1000 },
-#endif
+    { RANDOM_GAP_SIZE, 10000 },
 };
 static const size_t num_tests = sizeof(tests) / sizeof(tests[0]);
 
-static int run(struct bladerf *dev, int16_t *samples, const struct test_case *t)
+static int run(struct bladerf *dev, struct app_params *p,
+               int16_t *samples, const struct test_case *t)
 {
     int status;
     struct bladerf_metadata meta;
-    uint64_t timestamp;
+    uint64_t timestamp, gap;
     unsigned int i;
     bool pass = true;
-
-    assert(t->gap <= BUF_SIZE);
 
     /* Clear out flags, request timestamp = 0 "Any" */
     memset(&meta, 0, sizeof(meta));
@@ -101,8 +101,12 @@ static int run(struct bladerf *dev, int16_t *samples, const struct test_case *t)
         goto out;
     }
 
-    printf("\nTest Case: Read size=%"PRIu64" samples, %u iterations\n",
-            t->gap, t->iterations);
+    if (t->gap != 0) {
+        printf("\nTest Case: Read size=%"PRIu64" samples, %u iterations\n",
+                t->gap, t->iterations);
+    } else {
+        printf("\nTest Case: Random read size, %u iterations\n", t->iterations);
+    }
     printf("--------------------------------------------------------\n");
 
     /* Initial read to get a starting timestamp */
@@ -116,12 +120,30 @@ static int run(struct bladerf *dev, int16_t *samples, const struct test_case *t)
     printf("Initial status:    0x%08"PRIu32"\n", meta.status);
 
     for (i = 0; i < t->iterations && status == 0 && pass; i++) {
+
+        if (t->gap == 0) {
+            const uint64_t tmp = randval_update(&p->prng_state) % BUF_SIZE;
+            if (tmp == 0) {
+                gap = BUF_SIZE;
+            } else {
+                gap = tmp;
+            }
+        } else {
+            gap = t->gap;
+        }
+        assert(t->gap <= BUF_SIZE);
+
         /* Calculate the next expected timestamp
          * FIXME We need to change the FPGA to remove the 2x factor */
         timestamp = meta.timestamp + 2 * t->gap;
 
         /* Reset metadata timestamp value to indicate that we we want
-         * whatever is available */
+         * whatever is available
+         *
+         * TODO: Can we currently request data at a certain timestamp? This
+         *       may not be implemented in the FPGA...so zeroing here may be
+         *       a moot point.
+         */
         meta.timestamp = 0;
 
         status = bladerf_sync_rx(dev, samples, t->gap, &meta, TIMEOUT_MS);
@@ -156,7 +178,7 @@ out:
     return status;
 }
 
-int test_rx_gaps(struct bladerf *dev)
+int test_rx_gaps(struct bladerf *dev, struct app_params *p)
 {
     int status = 0;
     int16_t *samples;
@@ -169,7 +191,7 @@ int test_rx_gaps(struct bladerf *dev)
     }
 
     for (i = 0; i < num_tests && status == 0; i++) {
-        status = run(dev, samples, &tests[i]);
+        status = run(dev, p, samples, &tests[i]);
     }
 
     free(samples);

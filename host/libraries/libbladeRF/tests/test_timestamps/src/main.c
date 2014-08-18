@@ -30,18 +30,10 @@
 #include <getopt.h>
 #include <libbladeRF.h>
 #include "conversions.h"
+#include "test_timestamps.h"
 
-#define DEFAULT_SAMPLERATE  1000000
+#define OPTSTR "hd:s:S:t:v:"
 
-struct app_params {
-    char *device_str;
-    unsigned int samplerate;
-
-    char *test_name;
-};
-
-
-#define OPTSTR "hd:s:t:v:"
 static const struct option long_options[] = {
     { "help",       no_argument,        0,      'h' },
 
@@ -54,6 +46,9 @@ static const struct option long_options[] = {
 
     /* Verbosity options */
     { "lib-verbosity",      required_argument,  0,      'v' },
+
+    /* Seed to use for tests utilizing a PRNG */
+    { "seed",               required_argument,  0,      'S' },
 
     { 0,                    0,                  0,      0   },
 };
@@ -83,7 +78,9 @@ static void usage(const char *argv0)
 
     printf("Test configuration:\n");
     printf("    -t, --test <name>         Test name to run. Options are:\n");
-    printf("         rx_gaps     Check for unexpected gaps in samples.\n");
+    printf("         rx_gaps              Check for unexpected gaps in samples.\n");
+    printf("\n");
+    printf("    -S, --seed <value>        Seed to use for PRNG-based test cases.\n");
     printf("\n");
 
     printf("Misc options:\n");
@@ -96,7 +93,7 @@ static void init_app_params(struct app_params *p)
 {
     memset(p, 0, sizeof(p[0]));
     p->samplerate = 1000000;
-
+    p->prng_seed = 1;
 }
 
 static void deinit_app_params(struct app_params *p)
@@ -166,6 +163,14 @@ static int handle_args(int argc, char *argv[], struct app_params *p)
                 }
                 break;
 
+            case 'S':
+                p->prng_seed = str2uint64(optarg, 1, UINT64_MAX, &ok);
+                if (!ok) {
+                    fprintf(stderr, "Invalid seed value: %s\n", optarg);
+                    return -1;
+                }
+                break;
+
             default:
                 return -1;
         }
@@ -177,6 +182,8 @@ static int handle_args(int argc, char *argv[], struct app_params *p)
 static inline int apply_params(struct bladerf *dev, struct app_params *p)
 {
     int status;
+
+    randval_init(&p->prng_state, p->prng_seed);
 
     status = bladerf_set_sample_rate(dev, BLADERF_MODULE_RX, p->samplerate, NULL);
     if (status != 0) {
@@ -197,7 +204,7 @@ static inline int apply_params(struct bladerf *dev, struct app_params *p)
     return 0;
 }
 
-extern int test_rx_gaps(struct bladerf *dev);
+extern int test_rx_gaps(struct bladerf *dev, struct app_params *p);
 
 int main(int argc, char *argv[])
 {
@@ -229,7 +236,7 @@ int main(int argc, char *argv[])
     }
 
     if (!strcasecmp(p.test_name, "rx_gaps")) {
-        status = test_rx_gaps(dev);
+        status = test_rx_gaps(dev, &p);
     } else {
         fprintf(stderr, "Unknown test: %s\n", p.test_name);
         status = -1;
