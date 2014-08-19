@@ -1171,6 +1171,8 @@ typedef enum {
      *
      * For example, to hold 2048 samples, a buffer must be at least 8192 bytes
      * large.
+     *
+     * When using this format, the RX and TX modules operate independently.
      */
     BLADERF_FORMAT_SC16_Q11,
 
@@ -1191,9 +1193,15 @@ typedef enum {
      * packing/unpacking the metadata into/from the data, via the
      * bladerf_metadata structure.
      *
-     * Currently, when using the asynchronous data transfer interface, the user
+     * However, when using the asynchronous data transfer interface, the user
      * is responsible for manually packing/unpacking this metadata into/from
      * their sample data.
+     *
+     * <b>Important:</b> In the current implementation, when using this format,
+     * the underlying RX and TX timestamp mechanisms are tightly coupled. For
+     * full-duplex operation in this mode, both RX and TX modules must be
+     * configured to use this format and must be configured for the same sample
+     * rate.  Unexpected results will occur if this guideline is not followed.
      */
     BLADERF_FORMAT_SC16_Q11_META,
 } bladerf_format;
