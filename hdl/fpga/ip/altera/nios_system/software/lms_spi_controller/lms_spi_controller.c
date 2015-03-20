@@ -26,6 +26,12 @@
 #include "fifoed_avalon_uart_regs.h"
 #include "altera_avalon_jtag_uart_regs.h"
 #include "altera_avalon_pio_regs.h"
+// 1wire includes
+#include "sockit_owm.h"
+#include "sockit_owm_regs.h"
+#include "ownet.h"
+#include "findtype.h"
+// general
 #include "priv/alt_busy_sleep.h"
 #include "priv/alt_file.h"
 #include <stdint.h>
@@ -336,18 +342,35 @@ void gps_calibration_monitor(){
 }
 
 
-static char fb_serial[8] = {0};
-void fb_update_1wire_serial(){
-	//read bits from 1wire hw...
+static char xb_ROM_data[8] = {"NULLDATA"};
+void xb_1wire_read_ROM(){
+	// put spaces in the cache
+	 sprintf(xb_ROM_data, "        ");
+
+	// attempt to acquire the 1-Wire Net
+	if (!owAcquire(0,0))
+	{
+	    sprintf(xb_ROM_data, "%%AQ_%d", owGetErrorNum());
+	    return;
+	}
+	#define _1_WIRE_DS2411_FAMILY_CODE (0x01)
+	int found = FindDevices(0, xb_ROM_data, _1_WIRE_DS2411_FAMILY_CODE, 1);
+	#undef _1_WIRE_DS2411_FAMILY_CODE
+
+	if(!found){
+	     sprintf(xb_ROM_data, "%%FD_%d", owGetErrorNum());
+	     return;
+	}
+
 }
 
-uint32_t fb_read_1wire_serial(uint32_t section){
-	if(section >= sizeof(fb_serial)/sizeof(uint32_t)){
+// returns the 1wire data that was read at startup and stored in xb_ROM_data
+uint8_t read_ROM_byte_at(uint8_t index){
+	if(index >= sizeof(xb_ROM_data)){
 		return 0;
 	}
 
-	uint32_t chunk = *((uint32_t*)(fb_serial + sizeof(uint32_t)*section));
-	return chunk;
+	return xb_ROM_data[index];
 }
 
 
@@ -452,7 +475,8 @@ const struct {
 	  GDEV_XB_GPS_UART_BAUD,
 	  GDEV_XB_GPS_UART_HASDATA,
 	  GDEV_XB_GPS_CALIBRATION_START,
-	  GDEV_XB_GPS_CALIBRATION_READ
+	  GDEV_XB_GPS_CALIBRATION_READ,
+	  GDEV_XB_1WIRE_READ_BYTE
   } gdev;
 
   int start, len;
@@ -473,7 +497,8 @@ const struct {
 	  {GDEV_XB_GPS_UART_BAUD,   56, 4},
 	  {GDEV_XB_GPS_UART_HASDATA,60, 4},
 	  {GDEV_XB_GPS_CALIBRATION_START,64, 4},
-	  {GDEV_XB_GPS_CALIBRATION_READ,68, 4}
+	  {GDEV_XB_GPS_CALIBRATION_READ,68, 4},
+	  {GDEV_XB_1WIRE_READ_BYTE, 72, 4}
 };
 
 
@@ -490,16 +515,10 @@ int main()
   debug("\r\n[NIOS POWER ON]");
 
 
-  // initialize circular buffer
-  // could use dynamic memory too if enabled
+  // initialize fifo GPS uart buffer
   uint8_t uart_buffer[XB_UART_FIFO_BUFFER_SIZE] = {0};
   uf = fifo_new(uart_buffer, sizeof(uart_buffer));
-  //{
-//	  int k = 0;
-//	  while(k++ < XB_UART_FIFO_BUFFER_SIZE){
-//		  uart_buffer[k-1] = 0;
-//	  }
-//  }
+
 
 /*
   char* msg = "<< NIOS OK >>\r\n";
@@ -510,13 +529,14 @@ int main()
 */
 
 
-  //--setup xb uart intrrupt handler, so no data is skipped
-  //create_xb_uart_interrupt();
 
   //--read the RF board serial number
-  //fb_update_1wire_serial();
+  // get the current serial code/ROM data from the 1wire DS2411
+  xb_1wire_read_ROM();
 
+  // start comm interface with Cypress USB controller and Lime Chip
   init_NIOS();
+
 
   /* Event loop never exits. */
   {
@@ -706,6 +726,11 @@ int main()
                             else if (device == GDEV_XB_GPS_CALIBRATION_START) {
 								COLLECT_BYTES(gps_calibration_start(tmpvar));
 							}
+                            else if (device == GDEV_XB_1WIRE_READ_BYTE){
+                            	if(cmd_ptr->addr == 0){
+                            		cmd_ptr->data = read_ROM_byte_at( cmd_ptr->data );
+                            	}
+                            }
                         } else if (isWrite) {
                             if (device == GDEV_TIME_TIMER) {
                                 IOWR_8DIRECT(TIME_TAMER, cmd_ptr->addr, 1) ;

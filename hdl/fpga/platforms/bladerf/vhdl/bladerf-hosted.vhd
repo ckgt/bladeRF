@@ -75,7 +75,11 @@ architecture hosted_bladerf of bladerf is
 		  xb_spi_gps_SS_n		:	out	std_logic;
 		  
 		  xb_uart_gps_rxd		:	in		std_logic ;
-		  xb_uart_gps_txd		:	out	std_logic 
+		  xb_uart_gps_txd		:	out	std_logic ;
+		  
+		  exp_1wire_e		:	out		std_logic ;
+		  exp_1wire_i		:	in			std_logic ;
+		  exp_1wire_p		:	out		std_logic 
       );
     end component nios_system;
 
@@ -257,6 +261,12 @@ architecture hosted_bladerf of bladerf is
 	 --custom pps calibration signals
 	 signal pps_calibration_clock_count : std_logic_vector(31 downto 0);
 	 signal pps_calibration_config		: std_logic_vector(7 downto 0);
+	 
+	 --custom 1wire signals
+	 signal nios_1wire_e : std_logic;
+	 signal nios_1wire_i : std_logic;
+	 signal nios_1wire_p : std_logic;
+	 
 	 
 
     signal xb_mode  : std_logic_vector(1 downto 0);
@@ -826,17 +836,21 @@ begin
         oc_i2c_sda_padoen_o => i2c_sda_oen,
         oc_i2c_arst_i       => '0',
         oc_i2c_scl_pad_i    => i2c_scl_in,
-        time_tamer_tx_clock             => tx_clock,
-        time_tamer_tx_reset             => tx_reset,
-        time_tamer_tx_time              => std_logic_vector(tx_timestamp),
-        time_tamer_rx_clock             => rx_clock,
-        time_tamer_rx_reset             => rx_reset,
-        time_tamer_rx_time              => std_logic_vector(rx_timestamp),
-        time_tamer_synchronize => timestamp_sync,
+        time_tamer_tx_clock      => tx_clock,
+        time_tamer_tx_reset      => tx_reset,
+        time_tamer_tx_time       => std_logic_vector(tx_timestamp),
+        time_tamer_rx_clock      => rx_clock,
+        time_tamer_rx_reset      => rx_reset,
+        time_tamer_rx_time       => std_logic_vector(rx_timestamp),
+        time_tamer_synchronize   => timestamp_sync,
 		  
 		  
-		  pps_count_in_export				=>   pps_calibration_clock_count,
-		  pps_cfg_out_export 				=>	  pps_calibration_config
+		  pps_count_in_export		=>   pps_calibration_clock_count,
+		  pps_cfg_out_export 		=>	  pps_calibration_config,
+		  
+			exp_1wire_e					=>		nios_1wire_e,
+			exp_1wire_i					=>		nios_1wire_i,
+			exp_1wire_p					=>		nios_1wire_p
       ) ;
 
     xb_gpio_direction_proc : for i in 0 to 31 generate
@@ -948,15 +962,22 @@ begin
     -- CTS and the SPI CSx are tied to the same signal.  When we are in reset, allow for SPI accesses
     fx3_uart_cts            <= '1' when sys_rst_sync = '0' else 'Z'  ;
 
+	 -- // XB GPS SPI connections
     exp_spi_clock           <= nios_xb_spi_clk;		--nios_sclk when ( nios_ss_n(1 downto 0) = "01" ) else '0' ;
     exp_spi_mosi            <= nios_xb_spi_mosi;	--nios_sdio when ( nios_ss_n(1 downto 0) = "01" ) else '0' ;
-    exp_spi_cs <= nios_xb_spi_cs;
+    exp_spi_cs 				<= nios_xb_spi_cs;
     nios_xb_spi_miso        <= exp_spi_miso;	
     --exp_gpio                <= (others =>'Z') ;
 	 
+	 -- // 1 Wire connections
+	 exp_1wire 					<= '0' when nios_1wire_e else 'Z';
+	 nios_1wire_i				<= exp_1wire;
+	 
+	 -- // XB GPS UART connections
 	 exp_uart_tx				<= nios_xb_uart_txd;
 	 nios_xb_uart_rxd			<= exp_uart_rx;
 
+	 -- // NUAND expansions specific
     mini_exp1               <= 'Z';
     mini_exp2               <= 'Z';
 
