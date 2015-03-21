@@ -23,6 +23,11 @@
 #define BACKEND_USB_H_
 
 #include "bladerf_priv.h"
+#include "fx3_fw.h"
+
+#if ENABLE_USB_DEV_RESET_ON_OPEN
+extern bool bladerf_usb_reset_device_on_open;
+#endif
 
 #ifndef SAMPLE_EP_IN
 #   define SAMPLE_EP_IN 0x81
@@ -83,7 +88,8 @@ typedef enum {
  * value on failure
  */
 struct usb_fns {
-    int (*probe)(struct bladerf_devinfo_list *info_list);
+    int (*probe)(backend_probe_target probe_target,
+                 struct bladerf_devinfo_list *info_list);
 
     /* Populates the `driver` pointer with a handle for the specific USB driver.
      * `info_in` describes the device to open, and may contain wildcards.
@@ -124,6 +130,9 @@ struct usb_fns {
                                 void *buffer, unsigned int timeout_ms);
 
     int (*deinit_stream)(void *driver, struct bladerf_stream *stream);
+
+    int (*open_bootloader)(void **driver, uint8_t bus, uint8_t addr);
+    void (*close_bootloader)(void *driver);
 };
 
 struct usb_driver {

@@ -52,6 +52,9 @@ uint8_t glPageBuffer[FLASH_PAGE_SIZE] __attribute__ ((aligned (32)));
 CyBool_t glCalCacheValid = CyFalse;
 uint8_t glCal[CAL_BUFFER_SIZE] __attribute__ ((aligned (32)));
 
+CyBool_t glDeviceReady   = CyFalse;         /* Used to denote that the device
+                                             * can't be accessed until the FPGA
+                                             * autoload is finished */
 CyBool_t glAutoLoadValid = CyFalse;
 uint8_t glAutoLoad[CAL_BUFFER_SIZE] __attribute__ ((aligned (32)));
 
@@ -346,6 +349,11 @@ CyBool_t NuandHandleVendorRequest(
     txen = rxen = CyFalse ;
     isHandled = CyTrue;
 
+    /* Device is not ready to handle requests */
+    if (!glDeviceReady && bRequest != BLADE_USB_CMD_QUERY_DEVICE_READY) {
+        return -1;
+    }
+
     switch (bRequest)
     {
     case BLADE_USB_CMD_QUERY_VERSION:
@@ -419,6 +427,11 @@ CyBool_t NuandHandleVendorRequest(
             ret = -1;
         }
 
+        CyU3PUsbSendRetCode(ret);
+    break;
+
+    case BLADE_USB_CMD_QUERY_DEVICE_READY:
+        ret = glDeviceReady ? 1 : 0;
         CyU3PUsbSendRetCode(ret);
     break;
 
@@ -926,28 +939,33 @@ void bladeRFInit(void)
 /* Entry function for the bladeRFAppThread. */
 void bladeRFAppThread_Entry( uint32_t input)
 {
-    uint8_t state;
-    int cnt;
     CyFxGpioInit();
 
     populateVersionString();
     extractSerialAndCal();
 
     bladeRFInit();
+    /* XXX Why do we need an 800ms delay here? It appears required for the FPGA
+     * load...
+     *
+     * Is there an I/O or state variable that we could instead poll?
+     */
+    CyU3PThreadSleep(800);
 
-    FpgaBeginProgram();
-    for (cnt = 0;;cnt++) {
-        CyU3PThreadSleep (100);
-        if (cnt == 8 && glAutoLoadValid) {
-            char fpga_len[11];
-            if (!NuandExtractField((void*)glAutoLoad, 0x100, "LEN", (char *)&fpga_len, 10)) {
-                fpga_len[10] = 0;
-                NuandLoadFromFlash(atoi(fpga_len));
-            }
-
+    if (glAutoLoadValid) {
+        char fpga_len[11] = {0};
+        if (!NuandExtractField((void*)glAutoLoad, 0x100, "LEN", (char *)&fpga_len, 10)) {
+            fpga_len[10] = 0;
+            FpgaBeginProgram();
+            NuandLoadFromFlash(atoi(fpga_len));
         }
+    }
 
-        CyU3PGpifGetSMState(&state);
+    glDeviceReady = CyTrue;
+
+    while ( 1 ) {
+        /* Additional application-specific code can go here */
+        CyU3PThreadSleep(1000);
     }
 }
 

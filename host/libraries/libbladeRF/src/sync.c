@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
  */
 #include <errno.h>
+#include <inttypes.h>
 
 /* Only switch on the verbose debug prints in this file when we *really* want
  * them. Otherwise, compile them out to avoid excessive log level checks
@@ -644,6 +645,87 @@ static int advance_tx_buffer(struct bladerf_sync *s, struct buffer_mgmt *b)
     return status;
 }
 
+static inline bool timestamp_in_past(struct bladerf_metadata *user_meta,
+                                     struct bladerf_sync *s)
+{
+    const bool in_past = user_meta->timestamp < s->meta.curr_timestamp;
+
+    if (in_past) {
+        log_debug("Provided timestamp=%"PRIu64" is in past: current=%"PRIu64"\n",
+                  user_meta->timestamp, s->meta.curr_timestamp);
+    }
+
+    return in_past;
+}
+
+struct tx_options {
+    bool flush;
+    bool zero_pad;
+};
+
+static inline int handle_tx_parameters(struct bladerf_metadata *user_meta,
+                                       struct bladerf_sync *s,
+                                       struct tx_options *options)
+{
+    if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) {
+        if (user_meta == NULL) {
+            log_debug("NULL metadata pointer passed to %s\n", __FUNCTION__);
+            return BLADERF_ERR_INVAL;
+        }
+
+        if (user_meta->flags & BLADERF_META_FLAG_TX_BURST_START) {
+            bool now = user_meta->flags & BLADERF_META_FLAG_TX_NOW;
+
+            if (s->meta.in_burst) {
+                log_debug("%s: BURST_START provided while already in a burst.\n",
+                          __FUNCTION__);
+                return BLADERF_ERR_INVAL;
+            } else if (!now && timestamp_in_past(user_meta, s)) {
+                return BLADERF_ERR_TIME_PAST;
+            }
+
+            s->meta.in_burst = true;
+            if (now) {
+                s->meta.now = true;
+                log_verbose("%s: Starting burst \"now\"\n", __FUNCTION__);
+            } else {
+                s->meta.curr_timestamp = user_meta->timestamp;
+                log_verbose("%s: Starting burst @ %llu\n", __FUNCTION__,
+                            (unsigned long long)s->meta.curr_timestamp);
+            }
+
+            if (user_meta->flags & BLADERF_META_FLAG_TX_UPDATE_TIMESTAMP) {
+                log_debug("UPDATE_TIMESTAMP ignored; BURST_START flag was used.\n");
+            }
+
+        } else if (user_meta->flags & BLADERF_META_FLAG_TX_NOW) {
+            log_debug("%s: TX_NOW was specified without BURST_START.\n",
+                    __FUNCTION__);
+            return BLADERF_ERR_INVAL;
+        } else if (user_meta->flags & BLADERF_META_FLAG_TX_UPDATE_TIMESTAMP) {
+            if (timestamp_in_past(user_meta, s)) {
+                return BLADERF_ERR_TIME_PAST;
+            } else {
+                options->zero_pad = true;
+            }
+        }
+
+        if (user_meta->flags & BLADERF_META_FLAG_TX_BURST_END) {
+            if (s->meta.in_burst) {
+                options->flush = true;
+            } else {
+                log_debug("%s: BURST_END provided while not in a burst.\n",
+                          __FUNCTION__);
+                return BLADERF_ERR_INVAL;
+            }
+        }
+
+        user_meta->status = 0;
+    }
+
+    return 0;
+}
+
 int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
              struct bladerf_metadata *user_meta, unsigned int timeout_ms)
 {
@@ -656,69 +738,26 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
     unsigned int samples_per_buffer = 0;
     uint8_t *samples_src = (uint8_t*)samples;
     uint8_t *buf_dest = NULL;
-    bool flush = false;
+    struct tx_options op = {
+        FIELD_INIT(.flush, false),
+        FIELD_INIT(.zero_pad, false),
+    };
+
+    log_verbose("%s: called for %u samples.\n", __FUNCTION__, num_samples);
 
     if (s == NULL || samples == NULL) {
         return BLADERF_ERR_INVAL;
     }
 
-    if (s->stream_config.format == BLADERF_FORMAT_SC16_Q11_META) {
-        if (user_meta == NULL) {
-            log_debug("NULL metadata pointer passed to %s\n", __FUNCTION__);
-            return BLADERF_ERR_INVAL;
-        }
-
-        log_verbose("%s: called for %u samples.\n", __FUNCTION__, num_samples);
-
-        if (user_meta->flags & BLADERF_META_FLAG_TX_BURST_START) {
-            bool now = user_meta->flags & BLADERF_META_FLAG_TX_NOW;
-
-            if (s->meta.in_burst) {
-                log_debug("%s: BURST_START provided while already in a burst.\n",
-                          __FUNCTION__);
-                return BLADERF_ERR_INVAL;
-            } else if (!now && user_meta->timestamp < s->meta.curr_timestamp) {
-                log_debug("Provided timestamp=%llu is in past: "
-                          "current=%llu\n",
-                          (unsigned long long)user_meta->timestamp,
-                          (unsigned long long)s->meta.curr_timestamp);
-
-                return BLADERF_ERR_TIME_PAST;
-            } else {
-                s->meta.in_burst = true;
-                if (now) {
-                    s->meta.now = true;
-                    log_verbose("%s: Starting burst \"now\"\n",
-                                __FUNCTION__);
-                } else {
-                    s->meta.curr_timestamp = user_meta->timestamp;
-                    log_verbose("%s: Starting burst @ %llu\n", __FUNCTION__,
-                                (unsigned long long)s->meta.curr_timestamp);
-                }
-            }
-        } else if (user_meta->flags & BLADERF_META_FLAG_TX_NOW) {
-            log_debug("%s: The TX_NOW was specified without BURST_START.\n",
-                    __FUNCTION__);
-            return BLADERF_ERR_INVAL;
-        }
-
-        if (user_meta->flags & BLADERF_META_FLAG_TX_BURST_END) {
-            if (s->meta.in_burst) {
-                flush = true;
-            } else {
-                log_debug("%s: BURST_END provided while not in a burst.\n",
-                          __FUNCTION__);
-                return BLADERF_ERR_INVAL;
-            }
-        }
-
-        user_meta->status = 0;
+    status = handle_tx_parameters(user_meta, s, &op);
+    if (status != 0) {
+        return status;
     }
 
     b = &s->buf_mgmt;
     samples_per_buffer = s->stream_config.samples_per_buffer;
 
-    while (status == 0 && ((samples_written < num_samples) || flush) ) {
+    while (status == 0 && ((samples_written < num_samples) || op.flush) ) {
 
         switch (s->state) {
             case SYNC_STATE_CHECK_WORKER: {
@@ -856,9 +895,63 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                         break;
 
                     case SYNC_META_STATE_SAMPLES:
-                        samples_to_copy =
-                            uint_min(num_samples - samples_written,
-                                     left_in_msg(s));
+                        if (op.zero_pad) {
+                            const uint64_t delta =
+                                user_meta->timestamp - s->meta.curr_timestamp;
+
+                            size_t to_zero;
+
+                            log_verbose("%s: User requested zero padding to "
+                                        "t=%"PRIu64" (%"PRIu64" + %"PRIu64")\n",
+                                        __FUNCTION__,
+                                        user_meta->timestamp,
+                                        s->meta.curr_timestamp, delta);
+
+                            if (delta < left_in_msg(s)) {
+                                to_zero = (size_t) delta;
+
+                                log_verbose("%s: Padded subset of msg "
+                                            "(%"PRIu64" samples)\n",
+                                            __FUNCTION__,
+                                            (uint64_t) to_zero);
+                            } else {
+                                to_zero = left_in_msg(s);
+
+                                log_verbose("%s: Padded remainder of msg "
+                                            "(%"PRIu64" samples)\n",
+                                            __FUNCTION__,
+                                            (uint64_t) to_zero);
+                            }
+
+                            memset(s->meta.curr_msg + METADATA_HEADER_SIZE +
+                                    samples2bytes(s, s->meta.curr_msg_off),
+                                   0, samples2bytes(s, to_zero));
+
+                            s->meta.curr_msg_off += to_zero;
+
+                            /* If we're going to supply the FPGA with a
+                             * discontinuity, it is required that the last two
+                             * samples provided be zero in order to hold the
+                             * DAC @ (0 + 0j). If we're ending a burst with only
+                             * a single sample at the end of the message, we'll
+                             * need to continue onto the next message. At this
+                             * next message, we'll either encounter the
+                             * requested timestamp or zero-fill the message to
+                             * fulfil this "two zero sample" requirement, and
+                             * set the timestamp appropriately at the following
+                             * message. */
+                            if (to_zero == 1 && left_in_msg(s) == 0) {
+                                s->meta.curr_timestamp += to_zero;
+                                log_verbose("Ended msg with single zero sample. "
+                                            "Padding into next message.\n");
+                            } else {
+                                s->meta.curr_timestamp = user_meta->timestamp;
+                                op.zero_pad = false;
+                            }
+                        }
+
+                        samples_to_copy = uint_min(num_samples - samples_written,
+                                                   left_in_msg(s));
 
                         if (samples_to_copy != 0) {
                             /* We have user data to copy into the current
@@ -873,13 +966,13 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                             samples_written += samples_to_copy;
 
                             log_verbose("%s: Copied %u samples. "
-                                        "Currrent message offset is now: %u\n",
+                                        "Current message offset is now: %u\n",
                                         __FUNCTION__, samples_to_copy,
                                         s->meta.curr_msg_off);
 
                         }
 
-                        if (left_in_msg(s) != 0 && flush) {
+                        if (left_in_msg(s) != 0 && op.flush) {
                             /* We're ending this buffer early and need to
                              * flush the remaining samples by setting all
                              * samples in the messages to (0 + 0j) */
@@ -925,7 +1018,8 @@ int sync_tx(struct bladerf *dev, void *samples, unsigned int num_samples,
                             /* We want to clear the flush flag if we've written
                              * all of our data, but keep it set if we have more
                              * data and need wrap around to another buffer */
-                            flush = flush && (samples_written != num_samples);
+                            op.flush =
+                                op.flush && (samples_written != num_samples);
                         }
 
                         break;

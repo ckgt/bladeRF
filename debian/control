@@ -1,19 +1,23 @@
 Source: bladerf
 Priority: extra
-Maintainer: Ryan Tucker <rtucker@gmail.com>
-Build-Depends: debhelper (>=9), cmake (>= 2.8.5), pkg-config, doxygen, libusb-1.0-0-dev (>= 1.0.12), libtecla1-dev, libncurses5-dev, git, help2man, pandoc
-Standards-Version: 3.9.4
+Maintainer: Ryan Tucker <bladerf@ryantucker.us>
+Build-Depends: debhelper (>=9), cmake (>= 2.8.5), pkg-config, doxygen,
+ libusb-1.0-0-dev (>= 1.0.12), libtecla-dev | libtecla1-dev, libncurses5-dev,
+ git, help2man, pandoc
+Standards-Version: 3.9.5
 Section: comm
 Homepage: http://www.nuand.com/bladeRF
 Vcs-Git: git://github.com/Nuand/bladeRF.git
 Vcs-Browser: https://github.com/Nuand/bladeRF
 
-Package: libbladerf0
+Package: libbladerf1
 Section: libs
 Architecture: any
 Multi-Arch: same
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${shlibs:Depends}, ${misc:Depends}, libusb-1.0-0 (>= 1.0.12)
+Recommends: bladerf-fpga, libbladerf-udev
+Suggests: bladerf-firmware
 Description: nuand bladeRF software-defined radio device
  The nuand bladeRF is an open-source software-defined radio (SDR) system,
  comprised of an RF transceiver, a field-programmable gate array (FPGA),
@@ -26,9 +30,7 @@ Package: libbladerf-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
-Depends: libbladerf0 (= ${binary:Version}), libc6-dev | libc-dev, ${misc:Depends}
-Replaces: libbladerf0-dev (<< 0.11.0+1SNAPSHOT20131229)
-Breaks: libbladerf0-dev (<< 0.11.0+1SNAPSHOT20131229)
+Depends: libbladerf1 (= ${binary:Version}), libc6-dev | libc-dev, ${misc:Depends}
 Description: nuand bladeRF software-defined radio device (header files)
  The nuand bladeRF is an open-source software-defined radio (SDR) system,
  comprised of an RF transceiver, a field-programmable gate array (FPGA),
@@ -38,18 +40,29 @@ Description: nuand bladeRF software-defined radio device (header files)
  This package contains the header files required for compiling bladeRF
  applications.
 
-Package: libbladerf0-dev
-Depends: libbladerf-dev, ${misc:Depends}
-Architecture: all
-Section: oldlibs
-Description: transitional dummy package
- This is a transitional dummy package.  It can safely be removed.
+Package: libbladerf-udev
+Section: libs
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}, udev
+Conflicts: libbladerf0
+Description: nuand bladeRF software-defined radio device (header files)
+ The nuand bladeRF is an open-source software-defined radio (SDR) system,
+ comprised of an RF transceiver, a field-programmable gate array (FPGA),
+ a microcontroller driving a USB 3.0 interface, and a suite of host
+ libraries and drivers to facilitate interaction with the device.
+ .
+ This package contains udev rules to ensure that the USB device is
+ configured correctly when connected.
 
 Package: bladerf
 Section: comm
 Architecture: any
 Multi-Arch: foreign
-Depends: libbladerf0 (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Depends: libbladerf1 (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}, libbladerf-udev
+Provides: bladerf-host
+Conflicts: bladerf-host
+Replaces: bladerf-host
 Description: nuand bladeRF software-defined radio device (tools)
  The nuand bladeRF is an open-source software-defined radio (SDR) system,
  comprised of an RF transceiver, a field-programmable gate array (FPGA),

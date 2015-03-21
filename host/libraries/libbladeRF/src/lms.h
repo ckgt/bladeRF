@@ -110,19 +110,6 @@ struct lms_xcvr_config {
     lms_bw rx_bw;                       /**< Receive Bandwidth */
 };
 
-struct lms_dc_reg_vals {
-    uint8_t lpf_tuning;
-    uint8_t tx_lpf_i;
-    uint8_t tx_lpf_q;
-    uint8_t rx_lpf_i;
-    uint8_t rx_lpf_q;
-    uint8_t dc_ref;
-    uint8_t rxvga2a_i;
-    uint8_t rxvga2a_q;
-    uint8_t rxvga2b_i;
-    uint8_t rxvga2b_q;
-};
-
 /**
  * Convert an integer to a bandwidth selection.
  * If the actual bandwidth is not available, the closest
@@ -144,6 +131,54 @@ lms_bw lms_uint2bw(unsigned int req);
  * @return bandwidth as an unsigned integer
  */
 unsigned int lms_bw2uint(lms_bw bw);
+
+/**
+ * Wrapper for setting bits in an LMS6002 register via a RMW operation
+ *
+ * @param   dev         Device to operate on
+ * @param   addr        Register address
+ * @param   mask        Bits to set should be '1'
+ *
+ * @return BLADERF_ERR_* value
+ */
+static inline int lms_set(struct bladerf *dev, uint8_t addr, uint8_t mask)
+{
+    int status;
+    uint8_t regval;
+
+    status = LMS_READ(dev, addr, &regval);
+    if (status != 0) {
+        return status;
+    }
+
+    regval |= mask;
+
+    return LMS_WRITE(dev, addr, regval);
+}
+
+/*
+ * Wrapper for clearing bits in an LMS6002 register via a RMW operation
+ *
+ * @param   dev         Device to operate on
+ * @param   addr        Register address
+ * @param   mask        Bits to clear should be '1'
+ *
+ * @return BLADERF_ERR_* value
+ */
+static inline int lms_clear(struct bladerf *dev, uint8_t addr, uint8_t mask)
+{
+    int status;
+    uint8_t regval;
+
+    status = LMS_READ(dev, addr, &regval);
+    if (status != 0) {
+        return status;
+    }
+
+    regval &= ~mask;
+
+    return LMS_WRITE(dev, addr, regval);
+}
 
 /**
  * Enable or disable the low-pass filter on the specified module

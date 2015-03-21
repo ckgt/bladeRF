@@ -45,19 +45,17 @@
 #include "fpga.h"
 #include "flash_fields.h"
 #include "backend/usb/usb.h"
+#include "fx3_fw.h"
 
-/*------------------------------------------------------------------------------
- * Device discovery & initialization/deinitialization
- *----------------------------------------------------------------------------*/
-
-int bladerf_get_device_list(struct bladerf_devinfo **devices)
+static int probe(backend_probe_target target_device,
+                 struct bladerf_devinfo **devices)
 {
     int ret;
     size_t num_devices;
     struct bladerf_devinfo *devices_local;
     int status;
 
-    status = backend_probe(&devices_local, &num_devices);
+    status = backend_probe(target_device, &devices_local, &num_devices);
 
     if (status < 0) {
         ret = status;
@@ -68,6 +66,15 @@ int bladerf_get_device_list(struct bladerf_devinfo **devices)
     }
 
     return ret;
+}
+
+/*------------------------------------------------------------------------------
+ * Device discovery & initialization/deinitialization
+ *----------------------------------------------------------------------------*/
+
+int bladerf_get_device_list(struct bladerf_devinfo **devices)
+{
+    return probe(BACKEND_PROBE_BLADERF, devices);
 }
 
 void bladerf_free_device_list(struct bladerf_devinfo *devices)
@@ -187,6 +194,19 @@ int bladerf_open_with_devinfo(struct bladerf **opened_device,
                     bladerf_strerror(status));
     }
 
+    dev->rx_filter = -1;
+    dev->tx_filter = -1;
+
+    dev->module_format[BLADERF_MODULE_RX] = -1;
+    dev->module_format[BLADERF_MODULE_TX] = -1;
+
+    /* Load any available calibration tables so that the LMS DC register
+     * configurations may be loaded in init_device */
+    status = config_load_dc_cals(dev);
+    if (status != 0) {
+        goto error;
+    }
+
     status = FPGA_IS_CONFIGURED(dev);
     if (status > 0) {
         /* If the FPGA version check fails, just warn, but don't error out.
@@ -200,17 +220,10 @@ int bladerf_open_with_devinfo(struct bladerf **opened_device,
         if (status != 0) {
             goto error;
         }
+    } else {
+        /* Try searching for an FPGA in the config search path */
+        status = config_load_fpga(dev);
     }
-
-    dev->rx_filter = -1;
-    dev->tx_filter = -1;
-
-    dev->module_format[BLADERF_MODULE_RX] = -1;
-    dev->module_format[BLADERF_MODULE_TX] = -1;
-
-    /* Load any configuration files or FPGA images that a user has stored
-     * for this device in their bladerf config directory */
-    status = config_load_all(dev);
 
 error:
     if (status < 0) {
@@ -253,12 +266,25 @@ void bladerf_close(struct bladerf *dev)
         free((void *)dev->fpga_version.describe);
         free((void *)dev->fw_version.describe);
 
-        dc_cal_tbl_free(dev->cal.dc_rx);
-        dc_cal_tbl_free(dev->cal.dc_tx);
+        dc_cal_tbl_free(&dev->cal.dc_rx);
+        dc_cal_tbl_free(&dev->cal.dc_tx);
 
         MUTEX_UNLOCK(&dev->ctrl_lock);
         free(dev);
     }
+}
+
+void bladerf_set_usb_reset_on_open(bool enabled)
+{
+#   if ENABLE_USB_DEV_RESET_ON_OPEN
+    bladerf_usb_reset_device_on_open = enabled;
+
+    log_verbose("USB reset on open %s\n", enabled ? "enabled" : "disabled");
+#   else
+    log_verbose("%s has no effect. "
+                "ENABLE_USB_DEV_RESET_ON_OPEN not set at compile-time.\n",
+                __FUNCTION__);
+#   endif
 }
 
 int bladerf_enable_module(struct bladerf *dev,
@@ -1093,6 +1119,9 @@ void bladerf_version(struct bladerf_version *version)
 void bladerf_log_set_verbosity(bladerf_log_level level)
 {
     log_set_verbosity(level);
+#if defined(LOG_SYSLOG_ENABLED)
+    log_debug("Log verbosity has been set to: %d", level);
+#endif
 }
 
 /*------------------------------------------------------------------------------
@@ -1588,5 +1617,50 @@ int bladerf_calibrate_dc(struct bladerf *dev, bladerf_cal_module module)
     status = lms_calibrate_dc(dev, module);
 
     MUTEX_UNLOCK(&dev->ctrl_lock);
+    return status;
+}
+
+/*------------------------------------------------------------------------------
+ * Bootloader recovery
+ *----------------------------------------------------------------------------*/
+
+int bladerf_get_bootloader_list(struct bladerf_devinfo **devices)
+{
+    return probe(BACKEND_PROBE_FX3_BOOTLOADER, devices);
+}
+
+int bladerf_load_fw_from_bootloader(const char *device_identifier,
+                                    bladerf_backend backend,
+                                    uint8_t bus, uint8_t addr,
+                                    const char *file)
+{
+    int status;
+    struct fx3_firmware *fw = NULL;
+    struct bladerf_devinfo devinfo;
+
+    if (device_identifier == NULL) {
+        bladerf_init_devinfo(&devinfo);
+        devinfo.backend = backend;
+        devinfo.usb_bus = bus;
+        devinfo.usb_addr = addr;
+    } else {
+        status = str2devinfo(device_identifier, &devinfo);
+        if (status != 0) {
+            return status;
+        }
+    }
+
+    status = fx3_fw_read(file, &fw);
+    if (status != 0) {
+        return status;
+    }
+
+    assert(fw != NULL);
+
+    status = backend_load_fw_from_bootloader(devinfo.backend, devinfo.usb_bus,
+                                             devinfo.usb_addr, fw);
+
+
+    fx3_fw_deinit(fw);
     return status;
 }

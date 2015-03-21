@@ -233,7 +233,7 @@ Prints the following information about an opened device:
  * FPGA size
  * Whether or not the FPGA is loaded
  * USB bus, address, and speed
- * Backend (libusb or kernel module)
+ * Backend (Denotes which device interface code is being used.)
  * Instance number
 
 
@@ -436,9 +436,17 @@ The print command takes a parameter to print.  The parameter is one of:
 probe
 -----
 
-Usage: `probe`
+Usage: `probe [strict]`
 
 Search for attached bladeRF device and print a list of results.
+
+Without specifying `strict`, the lack of any available devices is not considered
+an error.
+
+When provided the optional `strict` argument, this command will treat the
+situation where no devices are found as an error, causing scripts or
+lists of commands provided via the `-e` command line argument to terminate
+immediately.
 
 
 quit
@@ -466,9 +474,6 @@ device will be loaded with and begin executing the provided firmware.
 In most cases, after successfully loading firmware into the device's RAM,
 users should open the device with the "`open`" command, and write the
 firmware to flash via "`load fx3 <firmware file>`"
-
-Note: This command is only available when `bladeRF-cli` is built with
-`libusb` support.
 
 
 run

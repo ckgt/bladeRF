@@ -2,7 +2,7 @@
  * This file is part of the bladeRF project:
  *   http://www.github.com/nuand/bladeRF
  *
- * Copyright (C) 2013 Nuand LLC
+ * Copyright (C) 2013-2014 Nuand LLC
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -49,6 +49,23 @@
 #define MHz(x) (x * 1000000)
 #define GHz(x) (x * 1000000000)
 
+struct dc_cal_state {
+    uint8_t clk_en;                 /* Backup of clock enables */
+
+    uint8_t reg0x71;                /* Backup of registers */
+    uint8_t reg0x7c;
+
+    bladerf_lna_gain lna_gain;      /* Backup of gain values */
+    int rxvga1_gain;
+    int rxvga2_gain;
+
+    uint8_t base_addr;              /* Base address of DC cal regs */
+    unsigned int num_submodules;    /* # of DC cal submodules to operate on */
+
+    int rxvga1_curr_gain;           /* Current gains used in retry loops */
+    int rxvga2_curr_gain;
+};
+
 /* LPF conversion table */
 static const unsigned int uint_bandwidths[] = {
     MHz(28),
@@ -76,6 +93,41 @@ static const unsigned int uint_bandwidths[] = {
     FIELD_INIT(.value, value_), \
 }
 
+/* Here we define more conservative band ranges than those in the
+ * LMS FAQ (5.24), with the intent of avoiding the use of "edges" that might
+ * cause the PLLs to lose lock over temperature changes */
+#define VCO4_LOW    3800000000ull
+#define VCO4_HIGH   4620000000ull
+
+#define VCO3_LOW    VCO4_HIGH
+#define VCO3_HIGH   5408000000ull
+
+#define VCO2_LOW    VCO3_HIGH
+#define VCO2_HIGH   6480000000ull
+
+#define VCO1_LOW    VCO2_HIGH
+#define VCO1_HIGH   7600000000ull
+
+#if VCO4_LOW/16 != BLADERF_FREQUENCY_MIN
+#   error "BLADERF_FREQUENCY_MIN is not actual VCO4_LOW/16 minimum"
+#endif
+
+#if VCO1_HIGH/2 != BLADERF_FREQUENCY_MAX
+#   error "BLADERF_FREQUENCY_MAX is not actual VCO1_HIGH/2 maximum"
+#endif
+
+/* SELVCO values */
+#define VCO4 (4 << 3)
+#define VCO3 (5 << 3)
+#define VCO2 (6 << 3)
+#define VCO1 (7 << 3)
+
+/* FRANGE values */
+#define DIV2  0x4
+#define DIV4  0x5
+#define DIV8  0x6
+#define DIV16 0x7
+
 /* Frequency Range table. Corresponds to the LMS FREQSEL table.
  * Per feedback from the LMS google group, the last entry, listed as 3.72G
  * in the programming manual, can be applied up to 3.8G */
@@ -84,22 +136,22 @@ static const struct freq_range {
     uint32_t    high;
     uint8_t     value;
 } bands[] = {
-    FREQ_RANGE(BLADERF_FREQUENCY_MIN,   285625000,              0x27),
-    FREQ_RANGE(285625000,               336875000,              0x2f),
-    FREQ_RANGE(336875000,               405000000,              0x37),
-    FREQ_RANGE(405000000,               465000000,              0x3f),
-    FREQ_RANGE(465000000,               571250000,              0x26),
-    FREQ_RANGE(571250000,               673750000,              0x2e),
-    FREQ_RANGE(673750000,               810000000,              0x36),
-    FREQ_RANGE(810000000,               930000000,              0x3e),
-    FREQ_RANGE(930000000,               1142500000,             0x25),
-    FREQ_RANGE(1142500000,              1347500000,             0x2d),
-    FREQ_RANGE(1347500000,              1620000000,             0x35),
-    FREQ_RANGE(1620000000,              1860000000,             0x3d),
-    FREQ_RANGE(1860000000u,             2285000000u,            0x24),
-    FREQ_RANGE(2285000000u,             2695000000u,            0x2c),
-    FREQ_RANGE(2695000000u,             3240000000u,            0x34),
-    FREQ_RANGE(3240000000u,             BLADERF_FREQUENCY_MAX,  0x3c),
+    FREQ_RANGE(BLADERF_FREQUENCY_MIN,   VCO4_HIGH/16,           VCO4 | DIV16),
+    FREQ_RANGE(VCO3_LOW/16,             VCO3_HIGH/16,           VCO3 | DIV16),
+    FREQ_RANGE(VCO2_LOW/16,             VCO2_HIGH/16,           VCO2 | DIV16),
+    FREQ_RANGE(VCO1_LOW/16,             VCO1_HIGH/16,           VCO1 | DIV16),
+    FREQ_RANGE(VCO4_LOW/8,              VCO4_HIGH/8,            VCO4 | DIV8),
+    FREQ_RANGE(VCO3_LOW/8,              VCO3_HIGH/8,            VCO3 | DIV8),
+    FREQ_RANGE(VCO2_LOW/8,              VCO2_HIGH/8,            VCO2 | DIV8),
+    FREQ_RANGE(VCO1_LOW/8,              VCO1_HIGH/8,            VCO1 | DIV8),
+    FREQ_RANGE(VCO4_LOW/4,              VCO4_HIGH/4,            VCO4 | DIV4),
+    FREQ_RANGE(VCO3_LOW/4,              VCO3_HIGH/4,            VCO3 | DIV4),
+    FREQ_RANGE(VCO2_LOW/4,              VCO2_HIGH/4,            VCO2 | DIV4),
+    FREQ_RANGE(VCO1_LOW/4,              VCO1_HIGH/4,            VCO1 | DIV4),
+    FREQ_RANGE(VCO4_LOW/2,              VCO4_HIGH/2,            VCO4 | DIV2),
+    FREQ_RANGE(VCO3_LOW/2,              VCO3_HIGH/2,            VCO3 | DIV2),
+    FREQ_RANGE(VCO2_LOW/2,              VCO2_HIGH/2,            VCO2 | DIV2),
+    FREQ_RANGE(VCO1_LOW/2,              BLADERF_FREQUENCY_MAX,  VCO1 | DIV2),
 };
 
  /*
@@ -204,38 +256,6 @@ static const uint8_t lms_reg_dumpset[] = {
 #define LOOPBBEN_TXVGA  (2 << 2)
 #define LOOPBBEN_ENVPK  (3 << 2)
 #define LOOBBBEN_MASK   (3 << 2)
-
-/* TODO migrate some RMW calls to use these set/clr functions */
-static inline int lms_set(struct bladerf *dev, uint8_t addr, uint8_t mask)
-{
-    int status;
-    uint8_t regval;
-
-    status = LMS_READ(dev, addr, &regval);
-    if (status != 0) {
-        return status;
-    }
-
-    regval |= mask;
-
-    return LMS_WRITE(dev, addr, regval);
-}
-
-static inline int lms_clr(struct bladerf *dev, uint8_t addr, uint8_t mask)
-{
-    int status;
-    uint8_t regval;
-
-    status = LMS_READ(dev, addr, &regval);
-    if (status != 0) {
-        return status;
-    }
-
-    regval &= ~mask;
-
-    return LMS_WRITE(dev, addr, regval);
-}
-
 
 static inline int is_loopback_enabled(struct bladerf *dev)
 {
@@ -1889,63 +1909,80 @@ static int lms_dc_cal_loop(struct bladerf *dev, uint8_t base,
     return status;
 }
 
-int lms_calibrate_dc(struct bladerf *dev, bladerf_cal_module module)
+static inline int dc_cal_backup(struct bladerf *dev,
+                                bladerf_cal_module module,
+                                struct dc_cal_state *state)
 {
     int status;
 
-    /* Working variables */
-    uint8_t cal_clock, base, addrs, i, val, dc_regval;
+    memset(state, 0, sizeof(state[0]));
 
-    /* Saved values that are to be restored */
-    uint8_t clockenables, reg0x71, reg0x7c;
-    lms_lna lna;
-
-    /* These are initialized to keep GCC 4.8 to avoid a false-positive
-     * warning about potentially uninitialized variables.
-     *
-     * FIXME If we're confusing the compiler such that it's generating such
-     *       warnings, it's an indicator that this huge function should be
-     *       cleaned up and simplified.
-     */
-    bladerf_lna_gain lna_gain = BLADERF_LNA_GAIN_BYPASS;
-    int rxvga1 = BLADERF_RXVGA1_GAIN_MIN;
-    int rxvga2 = BLADERF_RXVGA2_GAIN_MIN;
-
-    /* Save off the top level clock enables and LNA state */
-    status = LMS_READ(dev, 0x09, &clockenables);
+    status = LMS_READ(dev, 0x09, &state->clk_en);
     if (status != 0) {
         return status;
     }
 
-    status = lms_get_lna(dev, &lna);
-    if (status != 0) {
-        return status;
+    if (module == BLADERF_DC_CAL_RX_LPF || module == BLADERF_DC_CAL_RXVGA2) {
+        status = LMS_READ(dev, 0x71, &state->reg0x71);
+        if (status != 0) {
+            return status;
+        }
+
+        status = LMS_READ(dev, 0x7c, &state->reg0x7c);
+        if (status != 0) {
+            return status;
+        }
+
+        status = lms_lna_get_gain(dev, &state->lna_gain);
+        if (status != 0) {
+            return status;
+        }
+
+        status = lms_rxvga1_get_gain(dev, &state->rxvga1_gain);
+        if (status != 0) {
+            return status;
+        }
+
+        status = lms_rxvga2_get_gain(dev, &state->rxvga2_gain);
+        if (status != 0) {
+            return status;
+        }
     }
 
-    val = clockenables;
+    return 0;
+}
+
+static inline int dc_cal_module_init(struct bladerf *dev,
+                                     bladerf_cal_module module,
+                                     struct dc_cal_state *state)
+{
+    int status;
+    uint8_t cal_clock;
+    uint8_t val;
+
     switch (module) {
         case BLADERF_DC_CAL_LPF_TUNING:
             cal_clock = (1 << 5);  /* CLK_EN[5] - LPF CAL Clock */
-            base = 0x00;
-            addrs = 1;
+            state->base_addr = 0x00;
+            state->num_submodules = 1;
             break;
 
         case BLADERF_DC_CAL_TX_LPF:
             cal_clock = (1 << 1);  /* CLK_EN[1] - TX LPF DCCAL Clock */
-            base = 0x30;
-            addrs = 2;
+            state->base_addr = 0x30;
+            state->num_submodules = 2;
             break;
 
         case BLADERF_DC_CAL_RX_LPF:
             cal_clock = (1 << 3);  /* CLK_EN[3] - RX LPF DCCAL Clock */
-            base = 0x50;
-            addrs = 2;
+            state->base_addr = 0x50;
+            state->num_submodules = 2;
             break;
 
         case BLADERF_DC_CAL_RXVGA2:
             cal_clock = (1 << 4);  /* CLK_EN[4] - RX VGA2 DCCAL Clock */
-            base = 0x60;
-            addrs = 5;
+            state->base_addr = 0x60;
+            state->num_submodules = 5;
             break;
 
         default:
@@ -1953,304 +1990,438 @@ int lms_calibrate_dc(struct bladerf *dev, bladerf_cal_module module)
     }
 
     /* Enable the appropriate clock based on the module */
-    status = LMS_WRITE(dev, 0x09, clockenables | cal_clock);
+    status = LMS_WRITE(dev, 0x09, state->clk_en | cal_clock);
     if (status != 0) {
         return status;
     }
 
-    status = lms_select_lna(dev, lna);
-    if (status != 0) {
-        return status;
+    switch (module) {
+
+        case BLADERF_DC_CAL_LPF_TUNING:
+            /* Nothing special to do */
+            break;
+
+        case BLADERF_DC_CAL_RX_LPF:
+        case BLADERF_DC_CAL_RXVGA2:
+            /* FAQ 5.26 (rev 1.0r10) notes that the DC comparators should be
+             * powered up when performing DC calibration, and then powered down
+             * afterwards to improve receiver linearity */
+            if (module == BLADERF_DC_CAL_RXVGA2) {
+                status = lms_clear(dev, 0x6e, (3 << 6));
+                if (status != 0) {
+                    return status;
+                }
+            } else {
+                /* Power up RX LPF DC calibration comparator */
+                status = lms_clear(dev, 0x5f, (1 << 7));
+                if (status != 0) {
+                    return status;
+                }
+            }
+
+            /* Connect LNA to the external pads and internally terminate */
+            val = state->reg0x71 & ~(1 << 7);
+            status = LMS_WRITE(dev, 0x71, val);
+            if (status != 0) {
+                return status;
+            }
+
+            val = state->reg0x7c | (1 << 2);
+            status = LMS_WRITE(dev, 0x7c, val);
+            if (status != 0) {
+                return status;
+            }
+
+            /* Attempt to calibrate at max gain. */
+            status = lms_lna_set_gain(dev, BLADERF_LNA_GAIN_MAX);
+            if (status != 0) {
+                return status;
+            }
+
+            state->rxvga1_curr_gain = BLADERF_RXVGA1_GAIN_MAX;
+            status = lms_rxvga1_set_gain(dev, state->rxvga1_curr_gain);
+            if (status != 0) {
+                return status;
+            }
+
+            state->rxvga2_curr_gain = BLADERF_RXVGA2_GAIN_MAX;
+            status = lms_rxvga2_set_gain(dev, state->rxvga2_curr_gain);
+            if (status != 0) {
+                return status;
+            }
+
+            break;
+
+
+        case BLADERF_DC_CAL_TX_LPF:
+            /* FAQ item 4.1 notes that the DAC should be turned off or set
+             * to generate minimum DC */
+            status = lms_set(dev, 0x36, (1 << 7));
+            if (status != 0) {
+                return status;
+            }
+
+            /* Ensure TX LPF DC calibration comparator is powered up */
+            status = lms_clear(dev, 0x3f, (1 << 7));
+            if (status != 0) {
+                return status;
+            }
+            break;
+
+        default:
+            assert(!"Invalid module");
+            status = BLADERF_ERR_INVAL;
     }
 
-    /* Special case for RX LPF or RX VGA2 */
-    if (module == BLADERF_DC_CAL_RX_LPF || module == BLADERF_DC_CAL_RXVGA2) {
+    return status;
+}
 
-        /* FAQ 5.26 (rev 1.0r10) notes that the DC comparators should be powered
-         * up when performing DC calibration, and then powered down afterwards
-         * to improve receiver linearity */
-        if (module == BLADERF_DC_CAL_RXVGA2) {
-            status = LMS_READ(dev, 0x6e, &val);
-            if (status != 0) {
-                return status;
-            }
+/* The RXVGA2 items here are based upon Lime Microsystems' recommendations
+ * in their "Improving RxVGA2 DC Offset Calibration Stability" Document:
+ *  https://groups.google.com/group/limemicro-opensource/attach/19b675d099a22b89/Improving%20RxVGA2%20DC%20Offset%20Calibration%20Stability_v1.pdf?part=0.1&authuser=0
+ *
+ * This function assumes that the submodules are preformed in a consecutive
+ * and increasing order, as outlined in the above document.
+ */
+static inline int dc_cal_submodule(struct bladerf *dev,
+                                   bladerf_cal_module module,
+                                   unsigned int submodule,
+                                   struct dc_cal_state *state,
+                                   bool *converged)
+{
+    int status;
+    uint8_t val, dc_regval;
 
-            val &= ~(3 << 6);
+    *converged = false;
 
-            status = LMS_WRITE(dev, 0x6e, val);
-            if (status != 0) {
-                return status;
-            }
-        } else {
-            status = LMS_READ(dev, 0x5f, &val);
-            if (status != 0) {
-                return status;
-            }
+    if (module == BLADERF_DC_CAL_RXVGA2) {
+        switch (submodule) {
+            case 0:
+                /* Reset VGA2GAINA and VGA2GAINB to the default power-on values,
+                 * in case we're retrying this calibration due to one of the
+                 * later submodules failing. For the same reason, RXVGA2 decode
+                 * is disabled; it is not used for the RC reference module (0)
+                 */
 
-            val &= ~(1 << 7);
+                /* Disable RXVGA2 DECODE */
+                status = lms_clear(dev, 0x64, (1 << 0));
+                if (status != 0) {
+                    return status;
+                }
 
-            status = LMS_WRITE(dev, 0x5f, val);
-            if (status != 0) {
-                return status;
-            }
-        }
+                /* VGA2GAINA = 0, VGA2GAINB = 0 */
+                status = LMS_WRITE(dev, 0x68, 0x01);
+                if (status != 0) {
+                    return status;
+                }
+                break;
 
-        /* Connect LNA to the external pads and internally terminate */
-        status = LMS_READ(dev, 0x71, &reg0x71);
-        if (status != 0) {
-            return status;
-        }
+            case 1:
+                /* Setup for Stage 1 I and Q channels (submodules 1 and 2) */
 
-        val = reg0x71;
-        val &= ~(1 << 7);
+                /* Set to direct control signals: RXVGA2 Decode = 1 */
+                status = lms_set(dev, 0x64, (1 << 0));
+                if (status != 0) {
+                    return status;
+                }
 
-        status = LMS_WRITE(dev, 0x71, val);
-        if (status != 0) {
-            return status;
-        }
+                /* VGA2GAINA = 0110, VGA2GAINB = 0 */
+                val = 0x06;
+                status = LMS_WRITE(dev, 0x68, val);
+                if (status != 0) {
+                    return status;
+                }
+                break;
 
-        status = LMS_READ(dev, 0x7c, &reg0x7c);
-        if (status != 0) {
-            return status;
-        }
+            case 2:
+                /* No additional changes needed - covered by previous execution
+                 * of submodule == 1. */
+                break;
 
-        val = reg0x7c;
-        val |= (1 << 2);
+            case 3:
+                /* Setup for Stage 2 I and Q channels (submodules 3 and 4) */
 
-        status = LMS_WRITE(dev, 0x7c, val);
-        if (status != 0) {
-            return status;
-        }
+                /* VGA2GAINA = 0, VGA2GAINB = 0110 */
+                val = 0x60;
+                status = LMS_WRITE(dev, 0x68, val);
+                if (status != 0) {
+                    return status;
+                }
+                break;
 
-        /* Set maximum gain for everything, but save off current values */
-        status = lms_lna_get_gain(dev, &lna_gain);
-        if (status != 0) {
-            return status;
-        }
+            case 4:
+                /* No additional changes needed - covered by execution
+                 * of submodule == 3 */
+                break;
 
-        status = lms_lna_set_gain(dev, BLADERF_LNA_GAIN_MAX);
-        if (status != 0) {
-            return status;
-        }
-
-        status = lms_rxvga1_get_gain(dev, &rxvga1);
-        if (status != 0) {
-            return status;
-        }
-
-        status = lms_rxvga1_set_gain(dev, BLADERF_RXVGA1_GAIN_MAX);
-        if (status != 0) {
-            return status;
-        }
-
-        status = lms_rxvga2_get_gain(dev, &rxvga2);
-        if (status != 0) {
-            return status;
-        }
-
-       status = lms_rxvga2_set_gain(dev, BLADERF_RXVGA2_GAIN_MAX);
-       if (status != 0) {
-           return status;
-       }
-    } else if (module == BLADERF_DC_CAL_TX_LPF) {
-        /* FAQ item 4.1 notes that the DAC should be turned off or set
-         * to generate minimum DC */
-        status = LMS_READ(dev, 0x36, &val);
-        if (status != 0) {
-            return status;
-        }
-
-        val |= (1 << 7);
-
-        status = LMS_WRITE(dev, 0x36, val);
-        if (status != 0) {
-            return status;
-        }
-    }
-
-    /* Figure out number of addresses to calibrate based on module */
-    for (i = 0; i < addrs ; i++) {
-        status = lms_dc_cal_loop(dev, base, i, 31, &dc_regval);
-        if (status != 0) {
-            return status;
-        }
-
-        if (dc_regval == 31) {
-            log_debug("DC_REGVAL suboptimal value - retrying DC cal loop.\n");
-
-            /* FAQ item 4.7 indcates that can retry with DC_CNTVAL reset */
-            status = lms_dc_cal_loop(dev, base, i, 0, &dc_regval);
-            if (status != 0) {
-                return status;
-            } else if (dc_regval == 0) {
-                log_warning("Bad DC_REGVAL detected. DC cal failed.\n");
+            default:
+                assert(!"Invalid submodule");
                 return BLADERF_ERR_UNEXPECTED;
-            }
-        }
-
-        /* Special decoding addressing case for RXVGA2 */
-        if (module == BLADERF_DC_CAL_RXVGA2) {
-            switch (i) {
-
-                case 0:
-                    /* Set to direct control signals: RXVGA2 Decode = 1 */
-                    status = LMS_READ(dev, 0x64, &val);
-                    if (status != 0) {
-                        return status;
-                    }
-
-                    /* XXX: Workaround for VCM getting wonky on us.  Revisit later */
-                    val |= 1;
-                    val = 0x37;
-
-                    status = LMS_WRITE(dev, 0x64, val);
-                    if (status != 0) {
-                        return status;
-                    }
-
-                    /* VGA2GAINA = 0110, VGA2GAINB = 0 */
-                    val = 6;
-                    status = LMS_WRITE(dev, 0x68, val);
-                    if (status != 0) {
-                        return status;
-                    }
-                    break;
-
-                case 2:
-                    /* VGA2GAINA = 0, VGA2GAINB = 0110 */
-                    val = 6 << 4;
-                    status = LMS_WRITE(dev, 0x68, val);
-                    if (status != 0) {
-                        return status;
-                    }
-                    break;
-
-                case 4:
-                    /* Set to decode control signals: RXVGA2 Decode = 0 */
-                    status = LMS_READ(dev, 0x64, &val);
-                    if (status != 0) {
-                        return status;
-                    }
-
-                    /* XXX: Workaround for VCM getting wonky on us.  Revisit later */
-                    val &= (~1);
-                    val = 0x36;
-
-                    status = LMS_WRITE(dev, 0x64, val);
-                    if (status != 0) {
-                        return status;
-                    }
-                    break;
-            }
-        } else if (module == BLADERF_DC_CAL_LPF_TUNING) {
-            /* Special case for LPF tuning module where results are
-             * written to TX/RX LPF DCCAL */
-
-            /* Set the DC level to RX and TX DCCAL modules */
-            status = LMS_READ(dev, 0x35, &val);
-            if (status == 0) {
-                val &= ~(0x3f);
-                val |= dc_regval;
-                status = LMS_WRITE(dev, 0x35, val);
-            }
-
-            if (status != 0) {
-                return status;
-            }
-
-            status = LMS_READ(dev, 0x55, &val);
-            if (status == 0) {
-                val &= ~(0x3f);
-                val |= dc_regval;
-                status = LMS_WRITE(dev, 0x55, val);
-            }
-
-            if (status != 0) {
-                return status;
-            }
         }
     }
 
-    /* Special case for RX LPF or RX VGA2 */
+    status = lms_dc_cal_loop(dev, state->base_addr, submodule, 31, &dc_regval);
+    if (status != 0) {
+        return status;
+    }
+
+    if (dc_regval == 31) {
+        log_debug("DC_REGVAL suboptimal value - retrying DC cal loop.\n");
+
+        /* FAQ item 4.7 indcates that can retry with DC_CNTVAL reset */
+        status = lms_dc_cal_loop(dev, state->base_addr, submodule, 0, &dc_regval);
+        if (status != 0) {
+            return status;
+        } else if (dc_regval == 0) {
+            log_debug("Bad DC_REGVAL detected. DC cal failed.\n");
+            return 0;
+        }
+    }
+
+    if (module == BLADERF_DC_CAL_LPF_TUNING) {
+        /* Special case for LPF tuning module where results are
+         * written to TX/RX LPF DCCAL */
+
+        /* Set the DC level to RX and TX DCCAL modules */
+        status = LMS_READ(dev, 0x35, &val);
+        if (status == 0) {
+            val &= ~(0x3f);
+            val |= dc_regval;
+            status = LMS_WRITE(dev, 0x35, val);
+        }
+
+        if (status != 0) {
+            return status;
+        }
+
+        status = LMS_READ(dev, 0x55, &val);
+        if (status == 0) {
+            val &= ~(0x3f);
+            val |= dc_regval;
+            status = LMS_WRITE(dev, 0x55, val);
+        }
+
+        if (status != 0) {
+            return status;
+        }
+    }
+
+    *converged = true;
+    return 0;
+}
+
+static inline int dc_cal_retry_adjustment(struct bladerf *dev,
+                                          bladerf_cal_module module,
+                                          struct dc_cal_state *state,
+                                          bool *limit_reached)
+{
+    int status = 0;
+
+    switch (module) {
+        case BLADERF_DC_CAL_LPF_TUNING:
+        case BLADERF_DC_CAL_TX_LPF:
+            /* Nothing to adjust here */
+            *limit_reached = true;
+            break;
+
+        case BLADERF_DC_CAL_RX_LPF:
+            if (state->rxvga1_curr_gain > BLADERF_RXVGA1_GAIN_MIN) {
+                state->rxvga1_curr_gain -= 1;
+                log_debug("Retrying DC cal with RXVGA1=%d\n",
+                          state->rxvga1_curr_gain);
+                status = lms_rxvga1_set_gain(dev, state->rxvga1_curr_gain);
+            } else {
+                *limit_reached = true;
+            }
+            break;
+
+        case BLADERF_DC_CAL_RXVGA2:
+            if (state->rxvga1_curr_gain > BLADERF_RXVGA1_GAIN_MIN) {
+                state->rxvga1_curr_gain -= 1;
+                log_debug("Retrying DC cal with RXVGA1=%d\n",
+                          state->rxvga1_curr_gain);
+                status = lms_rxvga1_set_gain(dev, state->rxvga1_curr_gain);
+            } else if (state->rxvga2_curr_gain > BLADERF_RXVGA2_GAIN_MIN) {
+                state->rxvga2_curr_gain -= 3;
+                log_debug("Retrying DC cal with RXVGA2=%d\n",
+                          state->rxvga2_curr_gain);
+                status = lms_rxvga2_set_gain(dev, state->rxvga2_curr_gain);
+            } else {
+                *limit_reached = true;
+            }
+            break;
+
+        default:
+            *limit_reached = true;
+            assert(!"Invalid module");
+            status = BLADERF_ERR_UNEXPECTED;
+    }
+
+    if (*limit_reached) {
+        log_debug("DC Cal retry limit reached\n");
+    }
+    return status;
+}
+
+static inline int dc_cal_module_deinit(struct bladerf *dev,
+                                       bladerf_cal_module module,
+                                       struct dc_cal_state *state)
+{
+    int status = 0;
+
+    switch (module) {
+        case BLADERF_DC_CAL_LPF_TUNING:
+            /* Nothing special to do here */
+            break;
+
+        case BLADERF_DC_CAL_RX_LPF:
+            /* Power down RX LPF calibration comparator */
+            status = lms_set(dev, 0x5f, (1 << 7));
+            if (status != 0) {
+                return status;
+            }
+            break;
+
+        case BLADERF_DC_CAL_RXVGA2:
+            /* Restore defaults: VGA2GAINA = 1, VGA2GAINB = 0 */
+            status = LMS_WRITE(dev, 0x68, 0x01);
+            if (status != 0) {
+                return status;
+            }
+
+            /* Disable decode control signals: RXVGA2 Decode = 0 */
+            status = lms_clear(dev, 0x64, (1 << 0));
+            if (status != 0) {
+                return status;
+            }
+
+            /* Power DC comparitors down, per FAQ 5.26 (rev 1.0r10) */
+            status = lms_set(dev, 0x6e, (3 << 6));
+            if (status != 0) {
+                return status;
+            }
+            break;
+
+        case BLADERF_DC_CAL_TX_LPF:
+            /* Power down TX LPF DC calibration comparator */
+            status = lms_set(dev, 0x3f, (1 << 7));
+            if (status != 0) {
+                return status;
+            }
+
+            /* Re-enable the DACs */
+            status = lms_clear(dev, 0x36, (1 << 7));
+            if (status != 0) {
+                return status;
+            }
+            break;
+
+        default:
+            assert(!"Invalid module");
+            status = BLADERF_ERR_INVAL;
+    }
+
+    return status;
+}
+
+static inline int dc_cal_restore(struct bladerf *dev,
+                                 bladerf_cal_module module,
+                                 struct dc_cal_state *state)
+{
+    int status, ret;
+    ret = 0;
+
+    status = LMS_WRITE(dev, 0x09, state->clk_en);
+    if (status != 0) {
+        ret = status;
+    }
+
     if (module == BLADERF_DC_CAL_RX_LPF || module == BLADERF_DC_CAL_RXVGA2) {
-
-        /* Disable DC comparators */
-        if (module == BLADERF_DC_CAL_RXVGA2) {
-            status = LMS_READ(dev, 0x6e, &val);
-            if (status != 0) {
-                return status;
-            }
-
-            val |= (3 << 6);
-
-            status = LMS_WRITE(dev, 0x6e, val);
-            if (status != 0) {
-                return status;
-            }
-        } else {
-            status = LMS_READ(dev, 0x5f, &val);
-            if (status != 0) {
-                return status;
-            }
-
-            val |= (1 << 7);
-
-            status = LMS_WRITE(dev, 0x5f, val);
-            if (status != 0) {
-                return status;
-            }
+        status = LMS_WRITE(dev, 0x71, state->reg0x71);
+        if (status != 0 && ret == 0) {
+            ret = status;
         }
 
-        /* Restore previously saved LNA Gain, VGA1 gain and VGA2 gain */
-        status = lms_rxvga2_set_gain(dev, rxvga2);
-        if (status != 0) {
-            return status;
+        status = LMS_WRITE(dev, 0x7c, state->reg0x7c);
+        if (status != 0 && ret == 0) {
+            ret = status;
         }
 
-        status = lms_rxvga1_set_gain(dev, rxvga1);
-        if (status != 0) {
-            return status;
+        status = lms_lna_set_gain(dev, state->lna_gain);
+        if (status != 0 && ret == 0) {
+            ret = status;
         }
 
-        status = lms_lna_set_gain(dev, lna_gain);
-        if (status != 0) {
-            return status;
+        status = lms_rxvga1_set_gain(dev, state->rxvga1_gain);
+        if (status != 0 && ret == 0) {
+            ret = status;
         }
 
-        status = LMS_WRITE(dev, 0x71, reg0x71);
+        status = lms_rxvga2_set_gain(dev, state->rxvga2_gain);
         if (status != 0) {
-            return status;
-        }
-
-        status = LMS_WRITE(dev, 0x7c, reg0x7c);
-        if (status != 0) {
-            return status;
-        }
-    } else if (module == BLADERF_DC_CAL_TX_LPF) {
-        /* Re-enable the DACs */
-        status = LMS_READ(dev, 0x36, &val);
-        if (status != 0) {
-            return status;
-        }
-
-        val &= ~(1 << 7);
-
-        status = LMS_WRITE(dev, 0x36, val);
-        if (status != 0) {
-            return status;
+            ret = status;
         }
     }
 
-    /* Restore original clock enables and LNA */
-    status = lms_select_lna(dev, lna);
+    return ret;
+}
+
+static inline int dc_cal_module(struct bladerf *dev,
+                                bladerf_cal_module module,
+                                struct dc_cal_state *state,
+                                bool *converged)
+{
+    unsigned int i;
+    int status = 0;
+
+    *converged = true;
+
+    for (i = 0; i < state->num_submodules && *converged && status == 0; i++) {
+        status = dc_cal_submodule(dev, module, i, state, converged);
+    }
+
+    return status;
+}
+
+int lms_calibrate_dc(struct bladerf *dev, bladerf_cal_module module)
+{
+    int status, tmp_status;
+    struct dc_cal_state state;
+    bool converged, limit_reached;
+
+    status = dc_cal_backup(dev, module, &state);
     if (status != 0) {
         return status;
     }
 
-    status = LMS_WRITE(dev, 0x09, clockenables);
+    status = dc_cal_module_init(dev, module, &state);
     if (status != 0) {
-        return status;
+        goto error;
     }
+
+    converged = false;
+    limit_reached = false;
+
+    while (!converged && !limit_reached && status == 0) {
+        status = dc_cal_module(dev, module, &state, &converged);
+
+        if (status == 0 && !converged) {
+            status = dc_cal_retry_adjustment(dev, module, &state,
+                                             &limit_reached);
+        }
+    }
+
+    if (!converged && status == 0) {
+        log_warning("DC Calibration (module=%d) failed to converge.\n", module);
+        status = BLADERF_ERR_UNEXPECTED;
+    }
+
+error:
+    tmp_status = dc_cal_module_deinit(dev, module, &state);
+    status = (status != 0) ? status : tmp_status;
+
+    tmp_status = dc_cal_restore(dev, module, &state);
+    status = (status != 0) ? status : tmp_status;
 
     return status;
 }
@@ -2262,7 +2433,7 @@ static inline int enable_lpf_cal_clock(struct bladerf *dev, bool enable)
     if (enable) {
         return lms_set(dev, 0x09, mask);
     } else {
-        return lms_clr(dev, 0x09, mask);
+        return lms_clear(dev, 0x09, mask);
     }
 }
 
@@ -2273,7 +2444,7 @@ static inline int enable_rxvga2_dccal_clock(struct bladerf *dev, bool enable)
     if (enable) {
         return lms_set(dev, 0x09, mask);
     } else {
-        return lms_clr(dev, 0x09, mask);
+        return lms_clear(dev, 0x09, mask);
     }
 }
 
@@ -2284,7 +2455,7 @@ static inline int enable_rxlpf_dccal_clock(struct bladerf *dev, bool enable)
     if (enable) {
         return lms_set(dev, 0x09, mask);
     } else {
-        return lms_clr(dev, 0x09, mask);
+        return lms_clear(dev, 0x09, mask);
     }
 }
 
@@ -2295,7 +2466,7 @@ static inline int enable_txlpf_dccal_clock(struct bladerf *dev, bool enable)
     if (enable) {
         return lms_set(dev, 0x09, mask);
     } else {
-        return lms_clr(dev, 0x09, mask);
+        return lms_clear(dev, 0x09, mask);
     }
 }
 

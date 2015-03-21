@@ -5,9 +5,10 @@ project(bladeRF-cli C)
 # Version information
 ################################################################################
 
-set(VERSION_INFO_MAJOR  0)
-set(VERSION_INFO_MINOR  11)
-set(VERSION_INFO_PATCH  1)
+set(VERSION_INFO_MAJOR  1)
+set(VERSION_INFO_MINOR  1)
+set(VERSION_INFO_PATCH  2)
+
 if(NOT DEFINED VERSION_INFO_EXTRA)
     set(VERSION_INFO_EXTRA "git")
 endif()
@@ -51,7 +52,6 @@ endif(PANDOC_EXECUTABLE)
 # Build dependencies
 ################################################################################
 find_package(LibTecla)
-find_package(LibUSB)
 
 if(MSVC)
     find_package(LibPThreadsWin32 REQUIRED)
@@ -97,16 +97,15 @@ set(CLI_INCLUDE_DIRS
        ${BLADERF_HOST_COMMON_INCLUDE_DIRS}
        ${libbladeRF_SOURCE_DIR}/include
        ${BLADERF_FW_COMMON_INCLUDE_DIR}
-       ${UTILITIES_COMMON_INC_DIR}
 )
+
+if(MSVC)
+    set(CLI_INCLUDE_DIRS ${CLI_INCLUDE_DIRS} ${MSVC_C99_INCLUDES})
+endif()
 
 
 if(ENABLE_LIBTECLA)
     set(CLI_INCLUDE_DIRS ${CLI_INCLUDE_DIRS} ${LIBTECLA_INCLUDE_DIR})
-endif()
-
-if(LIBUSB_FOUND)
-    set(CLI_INCLUDE_DIRS ${CLI_INCLUDE_DIRS} ${LIBUSB_INCLUDE_DIRS})
 endif()
 
 if(MSVC)
@@ -151,6 +150,7 @@ set(BLADERF_CLI_SOURCE
         src/cmd/xb.c
         src/cmd/xb100.c
         src/cmd/xb200.c
+        src/cmd/recover.c
         src/cmd/rx.c
         src/cmd/rxtx.c
         src/cmd/tx.c
@@ -163,13 +163,6 @@ set(BLADERF_CLI_SOURCE
         ${BLADERF_HOST_COMMON_SOURCE_DIR}/log.c
         ${BLADERF_HOST_COMMON_SOURCE_DIR}/str_queue.c
 )
-
-if(LIBUSB_FOUND)
-  set(BLADERF_CLI_SOURCE ${BLADERF_CLI_SOURCE}
-          src/cmd/recover.c
-          ${UTILITIES_COMMON_SRC}/ezusb.c
-)
-endif()
 
 # Select the input mode (and script handling) backend
 if(ENABLE_LIBTECLA)
@@ -218,11 +211,6 @@ if(ENABLE_LIBTECLA)
 
 endif(ENABLE_LIBTECLA)
 
-if(LIBUSB_FOUND)
-    add_definitions(-DCLI_LIBUSB_ENABLED)
-    set(CLI_LINK_LIBRARIES ${CLI_LINK_LIBRARIES} ${LIBUSB_LIBRARIES})
-endif()
-
 if(LIBPTHREADSWIN32_FOUND)
     set(CLI_LINK_LIBRARIES ${CLI_LINK_LIBRARIES} ${LIBPTHREADSWIN32_LIBRARIES})
 endif()
@@ -253,7 +241,7 @@ if(BUILD_BLADERF_CLI_DOCUMENTATION)
         add_custom_command(
             OUTPUT bladeRF-cli.1
             DEPENDS bladeRF-cli src/cmd/doc/cmd_help.man
-            COMMAND ${HELP2MAN_EXECUTABLE} --no-info
+            COMMAND ${HELP2MAN_EXECUTABLE} --no-info --no-discard-stderr
                                            --opt-include=${CMAKE_CURRENT_SOURCE_DIR}/../doc/include_man/bladeRF-cli.h2m
                                            --opt-include=${CMAKE_CURRENT_BINARY_DIR}/src/cmd/doc/cmd_help.man
                                            --opt-include=${CMAKE_CURRENT_SOURCE_DIR}/../doc/include_man/common.h2m

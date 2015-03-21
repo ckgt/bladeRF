@@ -7,10 +7,11 @@ set(INCLUDES
 )
 set(LIBS libbladerf_shared)
 
-if(NOT MSVC)
-    set (LIBS ${LIBS} m)
+if(MSVC)
+    set(INCLUDES ${INCLUDES} ${MSVC_C99_INCLUDES})
 endif()
 
+include_directories(${INCLUDES})
 
 add_executable(libbladeRF_example_sync_rxtx sync_rxtx.c example_common.c)
 target_link_libraries(libbladeRF_example_sync_rxtx ${LIBS})

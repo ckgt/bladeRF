@@ -5,9 +5,9 @@ project(libbladeRF C)
 # Version information
 ################################################################################
 
-set(VERSION_INFO_MAJOR  0)
-set(VERSION_INFO_MINOR  16)
-set(VERSION_INFO_PATCH  2)
+set(VERSION_INFO_MAJOR  1)
+set(VERSION_INFO_MINOR  2)
+set(VERSION_INFO_PATCH  1)
 
 if(NOT DEFINED VERSION_INFO_EXTRA)
     set(VERSION_INFO_EXTRA "git")
@@ -48,15 +48,14 @@ endif()
 
 option(ENABLE_LIBBLADERF_LOGGING "Enable log messages in libbladeRF." ON)
 
+option(ENABLE_LIBBLADERF_SYSLOG "Enable logging to syslog (Linux/OSX)" OFF)
+
 option(BUILD_LIBBLADERF_DOCUMENTATION "Build libbladeRF documentation. Requries Doxygen." ${BUILD_DOCUMENTATION})
 if(NOT ${BUILD_DOCUMENTATION})
     set(BUILD_LIBBLADERF_DOCUMENTATION OFF)
 endif()
 
 option(BUILD_LIBBLADERF_DOC_EXAMPLES "Compile examples that are included in Doxygen documentation (mainly for QA purposes)." ${BUILD_LIBBLADERF_DOCUMENTATION})
-if(NOT ${BUILD_LIBBLADERF_DOCUMENTATION})
-    set(BUILD_LIBBLADERF_DOCUMENTATION OFF)
-endif()
 
 option(ENABLE_LIBBLADERF_SYNC_LOG_VERBOSE
       "Enable log_verbose() calls in the sync interface's data path. Note that this may harm performance."
@@ -66,6 +65,11 @@ option(ENABLE_LIBBLADERF_SYNC_LOG_VERBOSE
 option(ENABLE_LOCK_CHECKS
        "Enable checks for lock acquisition failures (e.g., deadlock)"
        OFF
+)
+
+option(ENABLE_USB_DEV_RESET_ON_OPEN
+       "Perform a USB port reset when opening a device. This works around an issue on some Linux USB 3.0 setups that prevents a device from being opened after an application crash or unclean exit."
+       ${BLADERF_OS_LINUX}
 )
 
 ##############################
@@ -114,6 +118,10 @@ if(ENABLE_LIBBLADERF_LOGGING)
     add_definitions(-DLOGGING_ENABLED)
 endif()
 
+if(ENABLE_LIBBLADERF_SYSLOG)
+    add_definitions(-DLOG_SYSLOG_ENABLED)
+endif()
+
 if(ENABLE_LOCK_CHECKS)
     add_definitions(-DENABLE_LOCK_CHECKS)
 endif()
@@ -139,10 +147,14 @@ set(LIBBLADERF_INCLUDES
     ${CMAKE_CURRENT_BINARY_DIR}/src
 )
 
+
+
 ################################################################################
 # Build dependencies
 ################################################################################
 if(MSVC)
+    set(LIBBLADERF_INCLUDES ${LIBBLADERF_INCLUDES} ${MSVC_C99_INCLUDES})
+
     find_package(LibPThreadsWin32 REQUIRED)
     if(LIBPTHREADSWIN32_FOUND)
         set(HAVE_THREADS true)
@@ -176,7 +188,7 @@ if(ENABLE_BACKEND_LIBUSB)
         message(FATAL_ERROR "libusb-1.0 not found. This is required to use the libbladeRF libusb backend. For binary releases, try setting LIBUSB_PATH.")
     else(NOT LIBUSB_FOUND)
         if(LIBUSB_VERSION)
-            if(LIBUSB_HAVE_GET_VERSION)
+            if(NOT LIBUSB_VERSION VERSION_LESS "1.0.10")
                 add_definitions(-DHAVE_LIBUSB_GET_VERSION)
             endif()
 
@@ -230,6 +242,10 @@ if(ENABLE_LIBBLADERF_SYNC_LOG_VERBOSE AND ENABLE_LIBBLADERF_LOGGING)
     add_definitions(-DENABLE_LIBBLADERF_SYNC_LOG_VERBOSE)
 endif()
 
+if(ENABLE_USB_DEV_RESET_ON_OPEN)
+    add_definitions(-DENABLE_USB_DEV_RESET_ON_OPEN=1)
+endif()
+
 include_directories(${LIBBLADERF_INCLUDES})
 
 ################################################################################
@@ -243,6 +259,7 @@ set(LIBBLADERF_SOURCE
         src/config.c
         src/dc_cal_table.c
         src/file_ops.c
+        src/fx3_fw.c
         src/fpga.c
         src/gain.c
         src/lms.c
@@ -258,6 +275,7 @@ set(LIBBLADERF_SOURCE
         src/sync_worker.c
         src/tuning.c
         src/version_compat.c
+        src/init_fini.c
         ${BLADERF_HOST_COMMON_SOURCE_DIR}/sha256.c
         ${BLADERF_HOST_COMMON_SOURCE_DIR}/conversions.c
         ${BLADERF_HOST_COMMON_SOURCE_DIR}/log.c
@@ -395,21 +413,16 @@ install(TARGETS libbladerf_shared
 message(STATUS "libbladeRF version: ${VERSION_INFO}")
 
 ################################################################################
-# Library tests
-################################################################################
-add_subdirectory(tests)
-
-################################################################################
 # Doxygen documentation
 ################################################################################
+if(BUILD_LIBBLADERF_DOC_EXAMPLES)
+    add_subdirectory(doc/examples)
+endif()
+
 if(BUILD_LIBBLADERF_DOCUMENTATION)
     find_package(Doxygen)
     if(DOXYGEN_FOUND)
         message(STATUS "Configured to build libbladeRF API documentation.")
-
-        if(BUILD_LIBBLADERF_DOC_EXAMPLES)
-            add_subdirectory(doc/examples)
-        endif()
 
         configure_file(
             ${CMAKE_CURRENT_SOURCE_DIR}/doc/doxygen/Doxyfile.in

@@ -176,7 +176,10 @@
 
 /* With msvc, inline is only available for C++. Otherwise we need to use __inline:
  *  http://msdn.microsoft.com/en-us/library/z8y1yy88.aspx */
-#   define inline __inline
+#   if !defined(__cplusplus)
+#       define inline __inline
+#   endif
+
 #endif // _MSC_VER
 
 #endif
@@ -196,13 +199,6 @@
 #   define FIELD_INIT(field, ...) __VA_ARGS__
 #else
 #   define FIELD_INIT(field, ...) field = __VA_ARGS__
-#endif // _MSC_VER
-
-/* MSVC doesn't have inttypes.h.  We'll use a local version for this environment. */
-#if _MSC_VER
-#   include <inttypes_msvc.h>
-#else
-#   include <inttypes.h>
 #endif // _MSC_VER
 
 /*******************************************************************************

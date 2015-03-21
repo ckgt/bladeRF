@@ -1,8 +1,0 @@
-cmake_minimum_required(VERSION 2.8)
-add_subdirectory(test_async)
-add_subdirectory(test_sync)
-add_subdirectory(test_unused_sync)
-add_subdirectory(test_repeater)
-add_subdirectory(test_ctrl)
-add_subdirectory(test_rx_discont)
-add_subdirectory(test_timestamps)

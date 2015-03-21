@@ -506,3 +506,48 @@ int str2args(const char *line, char comment_char, char ***argv_ret)
 
     return argc;
 }
+
+int str2lnagain(const char *str, bladerf_lna_gain *gain)
+{
+    *gain = BLADERF_LNA_GAIN_MAX;
+
+    if (!strcasecmp("max", str) ||
+        !strcasecmp("BLADERF_LNA_GAIN_MAX", str)) {
+        *gain = BLADERF_LNA_GAIN_MAX;
+        return 0;
+    } else if (!strcasecmp("mid", str) ||
+               !strcasecmp("BLADERF_LNA_GAIN_MID", str)) {
+        *gain = BLADERF_LNA_GAIN_MID;
+        return 0;
+    } else if (!strcasecmp("bypass", str) ||
+               !strcasecmp("BLADERF_LNA_GAIN_BYPASS", str)) {
+        *gain = BLADERF_LNA_GAIN_BYPASS;
+        return 0;
+    } else {
+        *gain = BLADERF_LNA_GAIN_UNKNOWN;
+        return -1;
+    }
+}
+
+const char *backend_description(bladerf_backend b)
+{
+    switch (b) {
+        case BLADERF_BACKEND_ANY:
+            return "Any";
+
+        case BLADERF_BACKEND_LINUX:
+            return "Linux kernel driver";
+
+        case BLADERF_BACKEND_LIBUSB:
+            return "libusb";
+
+        case BLADERF_BACKEND_CYPRESS:
+            return "Cypress driver";
+
+        case BLADERF_BACKEND_DUMMY:
+            return "Dummy";
+
+        default:
+            return "Unknown";
+    }
+}

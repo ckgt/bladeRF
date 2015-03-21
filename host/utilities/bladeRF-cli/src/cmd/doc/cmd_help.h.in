@@ -27,7 +27,7 @@
  * Any manual modifications to this file will be overwritten!
  * To edit the content of help strings, please edit interactive-help.md
  *
- * Last generated: Fri Aug 22 22:42:23 EDT 2014 by jynik
+ * Last generated: Thu Dec 18 17:47:58 EST 2014 by jynik
  */
 
 #ifndef BLADERF_CLI_DOC_CMD_HELP_H__
@@ -255,7 +255,7 @@
   "-   FPGA size\n" \
   "-   Whether or not the FPGA is loaded\n" \
   "-   USB bus, address, and speed\n" \
-  "-   Backend (libusb or kernel module)\n" \
+  "-   Backend (Denotes which device interface code is being used.)\n" \
   "-   Instance number\n" \
   "\n" \
 
@@ -437,9 +437,17 @@
 
 
 #define CLI_CMD_HELPTEXT_probe \
-  "Usage: probe\n" \
+  "Usage: probe [strict]\n" \
   "\n" \
   "Search for attached bladeRF device and print a list of results.\n" \
+  "\n" \
+  "Without specifying strict, the lack of any available devices is not\n" \
+  "considered an error.\n" \
+  "\n" \
+  "When provided the optional strict argument, this command will treat\n" \
+  "the situation where no devices are found as an error, causing scripts\n" \
+  "or lists of commands provided via the -e command line argument to\n" \
+  "terminate immediately.\n" \
   "\n" \
 
 
@@ -466,9 +474,6 @@
   "In most cases, after successfully loading firmware into the device's\n" \
   "RAM, users should open the device with the \"open\" command, and write\n" \
   "the firmware to flash via \"load fx3 <firmware file>\"\n" \
-  "\n" \
-  "Note: This command is only available when bladeRF-cli is built with\n" \
-  "libusb support.\n" \
   "\n" \
 
 

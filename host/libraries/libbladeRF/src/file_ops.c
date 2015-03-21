@@ -2,7 +2,7 @@
  * This file is part of the bladeRF project:
  *   http://www.github.com/nuand/bladeRF
  *
- * Copyright (C) 2013 Nuand LLC
+ * Copyright (C) 2013-2014 Nuand LLC
  * Copyright (C) 2013 Daniel Gröber <dxld ÄT darkboxed DOT org>
  *
  * This library is free software; you can redistribute it and/or
@@ -73,7 +73,7 @@ ssize_t file_size(FILE *f)
 {
     ssize_t rv = BLADERF_ERR_IO;
     long int fpos = ftell(f);
-    ssize_t len;
+    long len;
 
     if(fpos < 0) {
         log_verbose("ftell failed: %s\n", strerror(errno));
@@ -89,6 +89,9 @@ ssize_t file_size(FILE *f)
     if(len < 0) {
         log_verbose("ftell failed: %s\n", strerror(errno));
         goto out;
+    } else if (len == LONG_MAX) {
+        log_debug("ftell called with a directory?\n");
+        goto out;
     }
 
     if(fseek(f, fpos, SEEK_SET)) {
@@ -96,7 +99,8 @@ ssize_t file_size(FILE *f)
         goto out;
     }
 
-    rv = len;
+    rv = (ssize_t) len;
+    assert(rv == len);
 
 out:
     return rv;
@@ -146,11 +150,26 @@ out:
     return status;
 }
 
+/* Remove the last entry in a path. This is used to strip the executable name
+* from a path to get the directory that the executable resides in. */
+static size_t strip_last_path_entry(char *buf, char dir_delim)
+{
+    size_t len = strlen(buf);
+
+    while (len > 0 && buf[len - 1] != dir_delim) {
+        buf[len - 1] = '\0';
+        len--;
+    }
+
+    return len;
+}
 
 #if BLADERF_OS_LINUX || BLADERF_OS_OSX
 #define ACCESS_FILE_EXISTS F_OK
+#define DIR_DELIMETER '/'
 
 static const struct search_path_entries search_paths[] = {
+    { false, "" },
     { true,  "/.config/Nuand/bladeRF/" },
     { true,  "/.Nuand/bladeRF/" },
     { false, "/etc/Nuand/bladeRF/" },
@@ -159,21 +178,60 @@ static const struct search_path_entries search_paths[] = {
 
 static inline size_t get_home_dir(char *buf, size_t max_len)
 {
-    const uid_t uid = getuid();
-    const struct passwd *p = getpwuid(uid);
-    strncat(buf, p->pw_dir, max_len);
+    const char *home;
+
+    home = getenv("HOME");
+    if (home != NULL && strlen(home) > 0 && strlen(home) < max_len) {
+        strncat(buf, home, max_len);
+    } else {
+        const struct passwd *passwd;
+        const uid_t uid = getuid();
+        passwd = getpwuid(uid);
+        strncat(buf, passwd->pw_dir, max_len);
+    }
+
     return strlen(buf);
 }
 
-static inline size_t get_install_dir(char *buf, size_t max_len){
+static inline size_t get_install_dir(char *buf, size_t max_len)
+{
 	return 0;
 }
 
+#if BLADERF_OS_LINUX
+static inline size_t get_binary_dir(char *buf, size_t max_len)
+{
+    ssize_t result = readlink("/proc/self/exe", buf, max_len);
+
+    if (result > 0) {
+        return strip_last_path_entry(buf, DIR_DELIMETER);
+    } else {
+        return 0;
+    }
+}
+#elif BLADERF_OS_OSX
+#include <mach-o/dyld.h>
+static inline size_t get_binary_dir(char *buf, size_t max_len)
+{
+    uint32_t buf_size = max_len;
+    int status = _NSGetExecutablePath(buf, &buf_size);
+
+    if (status == 0) {
+        return strip_last_path_entry(buf, DIR_DELIMETER);
+    } else {
+        return 0;
+    }
+
+}
+#endif
+
 #elif BLADERF_OS_WINDOWS
 #define ACCESS_FILE_EXISTS 0
+#define DIR_DELIMETER '\\'
 #include <shlobj.h>
 
 static const struct search_path_entries search_paths[] = {
+    { false, "" },
     { true,  "/Nuand/bladeRF/" },
 };
 
@@ -218,6 +276,20 @@ static inline size_t get_home_dir(char *buf, size_t max_len)
     FreeLibrary(hDLL);
 
     return strlen(buf);
+}
+
+static inline size_t get_binary_dir(char *buf, size_t max_len)
+{
+    DWORD status;
+
+    assert(max_len <= MAXDWORD);
+    status = GetModuleFileName(NULL, buf, (DWORD) max_len);
+
+    if (status > 0) {
+        return strip_last_path_entry(buf, DIR_DELIMETER);
+    } else {
+        return 0;
+    }
 }
 
 static inline size_t get_install_dir(char *buf, size_t max_len)
@@ -269,7 +341,7 @@ static inline size_t get_install_dir(char *buf, size_t max_len)
     }
 
     len = (DWORD)max_len;
-    if (RegQueryValueEx(hk, "Path", 0, NULL, buf, &len) == ERROR_SUCCESS) {
+    if (RegQueryValueEx(hk, "Path", 0, NULL, (LPBYTE) buf, &len) == ERROR_SUCCESS) {
         if (len > 0 && len < max_len && buf[len - 1] != '\\')
             strcat(buf, "\\");
     } else
@@ -288,38 +360,97 @@ static inline size_t get_install_dir(char *buf, size_t max_len)
 #error "Unknown OS or missing BLADERF_OS_* definition"
 #endif
 
-/* We're not using functions that use the *nix PATH_MAX (which is known to be problematic),
- * or the WIN32 MAX_PATH.  Therefore,  we'll just use this arbitrary, but "sufficiently"
- * large max buffer size for paths */
+/* We're not using functions that use the *nix PATH_MAX (which is known to be
+ * problematic), or the WIN32 MAX_PATH.  Therefore,  we'll just use this
+ * arbitrary, but "sufficiently" large max buffer size for paths */
 #define PATH_MAX_LEN    4096
 
 char *file_find(const char *filename)
 {
     size_t i, max_len;
-    char *full_path = (char*) calloc(1, PATH_MAX_LEN + 1);
+    char *full_path = (char*) calloc(PATH_MAX_LEN + 1, 1);
+    const char *env_var = getenv("BLADERF_SEARCH_DIR");
 
+    /* Check directory specified by environment variable */
+    if (env_var != NULL) {
+        strncat(full_path, env_var, PATH_MAX_LEN - 1);
+        full_path[strlen(full_path)] = DIR_DELIMETER;
+
+        max_len = PATH_MAX_LEN - strlen(full_path);
+
+        if (max_len >= strlen(filename)) {
+            strncat(full_path, filename, max_len);
+            if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
+                return full_path;
+            }
+        }
+    }
+
+    /* Check the directory containing the currently running binary */
+    memset(full_path, 0, PATH_MAX_LEN);
+    max_len = PATH_MAX_LEN - 1;
+
+    if (get_binary_dir(full_path, max_len) != 0) {
+        max_len -= strlen(full_path);
+
+        if (max_len >= strlen(filename)) {
+            strncat(full_path, filename, max_len);
+            if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
+                return full_path;
+            }
+        } else {
+            log_debug("Skipping search for %s in %s. "
+                      "Path would be truncated.\n",
+                      filename, full_path);
+        }
+    }
+
+
+    /* Search our list of pre-determined paths */
     for (i = 0; i < ARRAY_SIZE(search_paths); i++) {
         memset(full_path, 0, PATH_MAX_LEN);
-        max_len = PATH_MAX_LEN - 1;
+        max_len = PATH_MAX_LEN;
 
         if (search_paths[i].prepend_home) {
-            max_len -= get_home_dir(full_path, max_len);
+            const size_t len = get_home_dir(full_path, max_len);
+
+            if (len != 0)  {
+                max_len -= len;
+            } else {
+                continue;
+            }
+
         }
 
         strncat(full_path, search_paths[i].path, max_len);
         max_len = PATH_MAX_LEN - strlen(full_path);
-        strncat(full_path, filename, max_len);
 
-        if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
-            return full_path;
+        if (max_len >= strlen(filename)) {
+            strncat(full_path, filename, max_len);
+
+            if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
+                return full_path;
+            }
+        } else {
+            log_debug("Skipping search for %s in %s. "
+                      "Path would be truncated.\n",
+                      filename, full_path);
         }
     }
 
+    /* Search the installation directory, if applicable */
     if (get_install_dir(full_path, PATH_MAX_LEN)) {
         max_len = PATH_MAX_LEN - strlen(full_path);
-        strncat(full_path, filename, max_len);
-        if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
-            return full_path;
+
+        if (max_len >= strlen(filename)) {
+            strncat(full_path, filename, max_len);
+            if (access(full_path, ACCESS_FILE_EXISTS) != -1) {
+                return full_path;
+            }
+        } else {
+            log_debug("Skipping search for %s in %s. "
+                      "Path would be truncated.\n",
+                      filename, full_path);
         }
     }
 

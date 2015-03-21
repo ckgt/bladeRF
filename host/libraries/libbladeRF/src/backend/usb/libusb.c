@@ -52,6 +52,12 @@ struct lusb_stream_data {
     size_t i;                           /* Index to next transfer */
     struct libusb_transfer **transfers; /* Array of transfer metadata */
     transfer_status *transfer_status;   /* Status of each transfer */
+
+   /* Warn the first time we get a transfer callback out of order.
+    * This shouldn't happen normaly, but we've seen it intermittently on
+    * libusb 1.0.19 for Windows. Further investigation required...
+    */
+    bool out_of_order_event;
 };
 
 static inline struct bladerf_lusb * lusb_backend(struct bladerf *dev)
@@ -173,14 +179,14 @@ static bool device_has_vid_pid(libusb_device *dev, uint16_t vid, uint16_t pid)
     return match;
 }
 
-static inline bool device_is_fx3_bootloader(libusb_device *dev)
+static bool device_is_fx3_bootloader(libusb_device *dev)
 {
     return device_has_vid_pid(dev, USB_CYPRESS_VENDOR_ID, USB_FX3_PRODUCT_ID) ||
            device_has_vid_pid(dev, USB_NUAND_VENDOR_ID,
                               USB_NUAND_BLADERF_BOOT_PRODUCT_ID);
 }
 
-static inline bool device_is_bladerf(libusb_device *dev)
+static bool device_is_bladerf(libusb_device *dev)
 {
     struct libusb_config_descriptor *cfg;
     int status;
@@ -219,7 +225,35 @@ static inline bool device_is_bladerf(libusb_device *dev)
     return ret;
 }
 
-static int lusb_probe(struct bladerf_devinfo_list *info_list)
+static bool device_is_probe_target(backend_probe_target probe_target,
+                                   libusb_device *dev)
+{
+    bool is_probe_target = false;
+
+    switch (probe_target) {
+        case BACKEND_PROBE_BLADERF:
+            is_probe_target = device_is_bladerf(dev);
+            if (is_probe_target) {
+                log_verbose("Found a bladeRF\n");
+            }
+            break;
+
+        case BACKEND_PROBE_FX3_BOOTLOADER:
+            is_probe_target = device_is_fx3_bootloader(dev);
+            if (is_probe_target) {
+                log_verbose("Found an FX3 bootloader.\n");
+            }
+            break;
+
+        default:
+            assert(!"Invalid probe target");
+    }
+
+    return is_probe_target;
+}
+
+static int lusb_probe(backend_probe_target probe_target,
+                      struct bladerf_devinfo_list *info_list)
 {
     int status, i, n;
     ssize_t count;
@@ -239,8 +273,7 @@ static int lusb_probe(struct bladerf_devinfo_list *info_list)
     count = libusb_get_device_list(context, &list);
     /* Iterate through all the USB devices */
     for (i = 0, n = 0; i < count && status == 0; i++) {
-        if (device_is_bladerf(list[i])) {
-            log_verbose("Found bladeRF (based upon VID/PID)\n");
+        if (device_is_probe_target(probe_target, list[i])) {
 
             /* Open the USB device and get some information */
             status = get_devinfo(list[i], &info);
@@ -249,7 +282,7 @@ static int lusb_probe(struct bladerf_devinfo_list *info_list)
                  * driver (e.g., CyUSB3) is associated with it. Therefore,
                  * just log to the debug level and carry on. */
                 status = 0;
-                log_debug("Could not open bladeRF device: %s\n",
+                log_debug("Could not open device: %s\n",
                           libusb_error_name(status) );
             } else {
                 info.instance = n++;
@@ -262,20 +295,6 @@ static int lusb_probe(struct bladerf_devinfo_list *info_list)
                                 info.instance);
                 }
             }
-        }
-
-        if (device_is_fx3_bootloader(list[i])) {
-            status = get_devinfo(list[i], &info);
-            if (status) {
-                log_error("Could not open bladeRF device: %s\n",
-                          libusb_error_name(status) );
-                continue;
-            }
-
-            log_info("Found FX3 bootloader device on bus=%d addr=%d. This may "
-                     "be a bladeRF.\nUse the bladeRF-cli command \"recover"
-                     " %d %d <FX3 firmware>\" to boot the bladeRF firmware.\n",
-                     info.usb_bus, info.usb_addr, info.usb_bus, info.usb_addr);
         }
     }
 
@@ -302,17 +321,181 @@ static void get_libusb_version(char *buf, size_t buf_len)
 }
 #endif
 
+
+static int open_device(const struct bladerf_devinfo *info,
+                       libusb_context *context,
+                       libusb_device *libusb_dev_in,
+                       struct bladerf_lusb **dev_out)
+{
+    int status;
+    struct bladerf_lusb *dev;
+
+    *dev_out = NULL;
+
+    dev = (struct bladerf_lusb *) calloc(1, sizeof(dev[0]));
+    if (dev == NULL) {
+        log_debug("Failed allocate handle for instance %d.\n",
+                  info->instance);
+
+        /* Report "no device" so we could try again with
+         * another matching device */
+        return BLADERF_ERR_NODEV;
+    }
+
+    dev->context = context;
+    dev->dev = libusb_dev_in;
+
+    status = libusb_open(libusb_dev_in, &dev->handle);
+    if (status < 0) {
+        log_debug("Failed to open device instance %d: %s\n",
+                  info->instance, libusb_error_name(status));
+
+        status = error_conv(status);
+        goto error;
+    }
+
+    status = libusb_claim_interface(dev->handle, 0);
+    if (status < 0) {
+        log_debug("Failed to claim interface 0 for instance %d: %s\n",
+                  info->instance, libusb_error_name(status));
+
+        status = error_conv(status);
+        goto error;
+    }
+
+error:
+    if (status != 0) {
+        if (dev->handle != NULL) {
+            libusb_close(dev->handle);
+        }
+
+        free(dev);
+    } else {
+        *dev_out = dev;
+    }
+
+    return status;
+}
+
+static int find_and_open_device(libusb_context *context,
+                                const struct bladerf_devinfo *info_in,
+                                struct bladerf_lusb **dev_out,
+                                struct bladerf_devinfo *info_out)
+{
+    int status = BLADERF_ERR_NODEV;
+    int i, n;
+    ssize_t count;
+    struct libusb_device **list;
+    struct bladerf_devinfo curr_info;
+
+    *dev_out = NULL;
+
+    count = libusb_get_device_list(context, &list);
+    if (count < 0) {
+        if (count < INT_MIN) {
+            /* Ensure we don't have a situation where we accidentally return 0
+             * due to a narrowing coversion */
+            return BLADERF_ERR_UNEXPECTED;
+        } else {
+            return error_conv((int) count);
+        }
+    }
+
+    for (i = 0, n = 0; (i < count) && (*dev_out == NULL); i++) {
+        if (device_is_bladerf(list[i])) {
+            log_verbose("Found a bladeRF (idx=%d)\n", i);
+
+            /* Open the USB device and get some information */
+            status = get_devinfo(list[i], &curr_info);
+            if (status < 0) {
+                log_debug("Could not open bladeRF device: %s\n",
+                        libusb_error_name(status) );
+                status = BLADERF_ERR_NODEV;
+                continue; /* Continue trying the next devices */
+            } else {
+                curr_info.instance = n++;
+            }
+
+            /* Check to see if this matches the info struct */
+            if (bladerf_devinfo_matches(&curr_info, info_in)) {
+                status = open_device(&curr_info, context, list[i], dev_out);
+                if (status < 0) {
+                    status = BLADERF_ERR_NODEV;
+                    continue; /* Continue trying the next matching device */
+                } else {
+                    memcpy(info_out, &curr_info, sizeof(info_out[0]));
+                }
+            } else {
+                status = BLADERF_ERR_NODEV;
+
+                log_verbose("Devinfo doesn't match - skipping"
+                        "(instance=%d, serial=%d, bus/addr=%d\n",
+                        bladerf_instance_matches(&curr_info, info_in),
+                        bladerf_serial_matches(&curr_info, info_in),
+                        bladerf_bus_addr_matches(&curr_info, info_in));
+            }
+        }
+    }
+
+    if (status == 0) {
+        /* Returning 0 indicates this function is providing a device */
+        assert(*dev_out != NULL);
+    }
+
+    libusb_free_device_list(list, 1);
+    return status;
+}
+
+#if ENABLE_USB_DEV_RESET_ON_OPEN
+static int reset_and_reopen(libusb_context *context,
+                            struct bladerf_lusb **dev,
+                            struct bladerf_devinfo *info)
+{
+    int status;
+
+    status = libusb_reset_device((*dev)->handle);
+    if (status == 0) {
+        log_verbose("USB port reset succeeded for bladeRF %s\n", info->serial);
+        return 0;
+    } else if (status == LIBUSB_ERROR_NO_DEVICE) {
+        struct bladerf_devinfo new_info;
+
+        /* The reset has caused the device to drop out and re-enumerate.
+         *
+         * We'll find it again via the info we gathered about it via its
+         * serial number, which is now stored in the devinfo
+         */
+        log_verbose("Re-scan required after port reset for bladeRF %s\n",
+                    info->serial);
+
+
+        libusb_release_interface((*dev)->handle, 0);
+        libusb_close((*dev)->handle);
+        *dev = NULL;
+
+        memcpy(&new_info, info, sizeof(new_info));
+        new_info.usb_bus  = DEVINFO_BUS_ANY;
+        new_info.usb_addr = DEVINFO_ADDR_ANY;
+
+        status = find_and_open_device(context, &new_info, dev, info);
+
+    } else {
+        status = BLADERF_ERR_IO;
+        log_verbose("Port reset failed for bladerf %s: %s\n",
+                    info->serial, libusb_error_name(status));
+    }
+
+    return status;
+}
+#endif
+
+
 static int lusb_open(void **driver,
                      struct bladerf_devinfo *info_in,
                      struct bladerf_devinfo *info_out)
 {
-    int status, i, n;
-    int fx3_status;
-    ssize_t count;
+    int status;
     struct bladerf_lusb *lusb = NULL;
-    libusb_device **list = NULL;
-    struct bladerf_devinfo thisinfo;
-
     libusb_context *context;
 
     /* Initialize libusb for device tree walking */
@@ -320,8 +503,7 @@ static int lusb_open(void **driver,
     if (status) {
         log_error("Could not initialize libusb: %s\n",
                   libusb_error_name(status));
-        status = error_conv(status);
-        goto error;
+        return error_conv(status);
     }
 
     /* We can only print this out when log output is enabled, or else we'll
@@ -334,121 +516,44 @@ static int lusb_open(void **driver,
     }
 #   endif
 
-    /* Iterate through all the USB devices */
-    count = libusb_get_device_list(context, &list);
-    for (i = 0, n = 0; i < count; i++) {
-        if (device_is_bladerf(list[i])) {
-            log_verbose("Found a bladeRF (based upon VID/PID)\n");
-
-            /* Open the USB device and get some information */
-            status = get_devinfo(list[i], &thisinfo);
-            if(status < 0) {
-                log_debug("Could not open bladeRF device: %s\n",
-                          libusb_error_name(status) );
-                status = 0;
-                continue; /* Continue trying the next devices */
-            }
-            thisinfo.instance = n++;
-
-            /* Check to see if this matches the info struct */
-            if (bladerf_devinfo_matches(&thisinfo, info_in)) {
-
-                lusb = (struct bladerf_lusb *)malloc(sizeof(struct bladerf_lusb));
-                if (lusb == NULL) {
-                    log_debug("Skipping instance %d due to failed allocation\n",
-                              thisinfo.instance);
-                    lusb = NULL;
-                    continue;   /* Try the next device */
-                }
-
-                lusb->context = context;
-                lusb->dev = list[i];
-
-                status = libusb_open(list[i], &lusb->handle);
-                if (status < 0) {
-                    log_debug("Skipping - could not open device: %s\n",
-                               libusb_error_name(status));
-
-                    /* Keep trying other devices */
-                    status = 0;
-                    free(lusb);
-                    lusb = NULL;
-                    continue;
-                }
-
-                status = libusb_claim_interface(lusb->handle, 0);
-                if(status < 0) {
-                    log_debug("Skipping - could not claim interface: %s\n",
-                              libusb_error_name(status));
-
-                    /* Keep trying other devices */
-                    status = 0;
-                    libusb_close(lusb->handle);
-                    free(lusb);
-                    lusb = NULL;
-                    continue;
-                }
-
-                memcpy(info_out, &thisinfo, sizeof(struct bladerf_devinfo));
-                *driver = lusb;
-                break;
-
-            } else {
-                log_verbose("Devinfo doesn't match - skipping"
-                            "(instance=%d, serial=%d, bus/addr=%d\n",
-                            bladerf_instance_matches(&thisinfo, info_in),
-                            bladerf_serial_matches(&thisinfo, info_in),
-                            bladerf_bus_addr_matches(&thisinfo, info_in));
-            }
-        }
-
-        if (device_is_fx3_bootloader(list[i])) {
-            fx3_status = get_devinfo(list[i], &thisinfo);
-            if (fx3_status != 0) {
-                log_debug("Could not open FX3 bootloader device: %s\n",
-                          libusb_error_name(fx3_status));
-                continue;
-            }
-
-            log_info("Found FX3 bootloader device on bus=%d addr=%d. "
-                     "This may be a bladeRF.\n",
-                     thisinfo.usb_bus, thisinfo.usb_addr);
-
-            log_info("Use bladeRF-cli command \"recover %d %d "
-                     "<FX3 firmware>\" to boot the bladeRF firmware.\n",
-                     thisinfo.usb_bus, thisinfo.usb_addr);
-        }
-    }
-
-
-error:
-    if (list) {
-        libusb_free_device_list(list, 1);
-    }
-
-    if (lusb == NULL) {
-        log_debug("No devices available on the libusb backend.\n");
-        status = BLADERF_ERR_NODEV;
-    }
-
+    status = find_and_open_device(context, info_in, &lusb, info_out);
     if (status != 0) {
-        if (lusb != NULL) {
-            if (lusb->handle) {
-                libusb_close(lusb->handle);
-            }
-
-            free(lusb);
-        }
-
         libusb_exit(context);
+
+        if (status == BLADERF_ERR_NODEV) {
+            log_debug("No devices available on the libusb backend.\n");
+        } else {
+            log_debug("Failed to open bladeRF on libusb backend: %s\n",
+                    bladerf_strerror(status));
+        }
+    } else {
+        assert(lusb != NULL);
+
+        /* Cosmin and Marian from Null Team (null.ro) and YateBTS(.com) found
+         * that it is possible to recover from "Issue #95: Not enough bandwidth
+         * for altsetting" by performing a USB port reset prior to actually
+         * trying to use the device.
+         */
+#       if ENABLE_USB_DEV_RESET_ON_OPEN
+        if (bladerf_usb_reset_device_on_open) {
+            status = reset_and_reopen(context, &lusb, info_out);
+        }
+#       endif
+
+        if (status == 0) {
+            *driver = (void *) lusb;
+        }
     }
+
     return status;
 }
 
 static int lusb_change_setting(void *driver, uint8_t setting)
 {
     struct bladerf_lusb *lusb = (struct bladerf_lusb *) driver;
+
     int status = libusb_set_interface_alt_setting(lusb->handle, 0, setting);
+
     return error_conv(status);
 }
 
@@ -467,6 +572,115 @@ static void lusb_close(void *driver)
     libusb_close(lusb->handle);
     libusb_exit(lusb->context);
     free(lusb);
+}
+
+static void lusb_close_bootloader(void *driver)
+{
+    int status;
+    struct bladerf_lusb *lusb = (struct bladerf_lusb *) driver;
+
+    if (lusb != NULL) {
+        if (lusb->handle != NULL) {
+            status = libusb_release_interface(lusb->handle, 0);
+            if (status < 0) {
+                log_debug("Failed to release interface: %s\n",
+                           libusb_error_name(status));
+            }
+
+            libusb_close(lusb->handle);
+        }
+
+        if (lusb->context != NULL) {
+            libusb_exit(lusb->context);
+        }
+
+        free(lusb);
+    }
+}
+
+static inline bool bus_matches(uint8_t bus, struct libusb_device *d)
+{
+    return (bus == DEVINFO_BUS_ANY) ||
+           (bus == libusb_get_bus_number(d));
+}
+
+static inline bool addr_matches(uint8_t addr, struct libusb_device *d)
+{
+    return (addr == DEVINFO_BUS_ANY) ||
+           (addr == libusb_get_device_address(d));
+}
+
+static int lusb_open_bootloader(void **driver, uint8_t bus, uint8_t addr)
+{
+    int status;
+    struct libusb_device **dev_list = NULL;
+    ssize_t dev_list_size, i;
+    struct bladerf_lusb *lusb;
+
+    *driver = NULL;
+
+    lusb = calloc(1, sizeof(lusb[0]));
+    if (lusb == NULL) {
+        return BLADERF_ERR_MEM;
+    }
+
+    status = libusb_init(&lusb->context);
+    if (status != 0) {
+        log_debug("Failed to initialize libusb context: %s\n",
+                  libusb_error_name(status));
+        goto error;
+    }
+
+    dev_list_size = libusb_get_device_list(lusb->context, &dev_list);
+    if (dev_list_size < 0) {
+        log_debug("Failed to get device list: %s\n", libusb_error_name(status));
+        status = (int) dev_list_size;
+        goto error;
+    }
+
+    for (i = 0; i < dev_list_size; i++) {
+        if (device_is_fx3_bootloader(dev_list[i]) &&
+            bus_matches(bus, dev_list[i]) &&
+            addr_matches(addr, dev_list[i])) {
+
+
+            status = libusb_open(dev_list[i], &lusb->handle);
+            if (status != 0) {
+                log_debug("Failed to open device: %s\n",
+                          libusb_error_name(status));
+                goto error;
+            } else {
+                status = libusb_claim_interface(lusb->handle, 0);
+                if (status < 0) {
+                    log_debug("Failed to claim interface: %s\n",
+                              libusb_error_name(status));
+
+                    goto error;
+                } else {
+                    log_verbose("Opened bootloader at %u:%u\n",
+                                libusb_get_bus_number(dev_list[i]),
+                                libusb_get_device_address(dev_list[i]));
+                    *driver = lusb;
+                }
+                break;
+            }
+        }
+    }
+
+error:
+    if (dev_list != NULL) {
+        libusb_free_device_list(dev_list, 1);
+    }
+
+    if (status != 0) {
+        status = error_conv(status);
+        lusb_close_bootloader(lusb);
+    } else if (*driver == NULL) {
+        status = BLADERF_ERR_NODEV;
+        lusb_close_bootloader(lusb);
+    }
+
+    return status;
 }
 
 static int lusb_get_speed(void *driver,
@@ -771,6 +985,33 @@ static void LIBUSB_CALL lusb_stream_cb(struct libusb_transfer *transfer)
     MUTEX_UNLOCK(&stream->lock);
 }
 
+static inline struct libusb_transfer *
+get_next_available_transfer(struct lusb_stream_data *stream_data)
+{
+    unsigned int n;
+    size_t i = stream_data->i;
+
+    for (n = 0; n < stream_data->num_transfers; n++) {
+        if (stream_data->transfer_status[i] == TRANSFER_AVAIL) {
+
+            if (stream_data->i != i &&
+                stream_data->out_of_order_event == false) {
+
+                log_warning("Transfer callback occurred out of order. "
+                            "(Warning only this time.)\r\n");
+                stream_data->out_of_order_event = true;
+            }
+
+            stream_data->i = i;
+            return stream_data->transfers[i];
+        }
+
+        i = (i + 1) % stream_data->num_transfers;
+    }
+
+    return NULL;
+}
+
 /* Precondition: A transfer is available. */
 static int submit_transfer(struct bladerf_stream *stream, void *buffer)
 {
@@ -783,13 +1024,8 @@ static int submit_transfer(struct bladerf_stream *stream, void *buffer)
     const unsigned char ep =
         stream->module == BLADERF_MODULE_TX ? SAMPLE_EP_OUT : SAMPLE_EP_IN;
 
-	// Instead of asserting we return LIBUSB_ERROR_OTHER.  This allows us to 
-	// reinitialize sync_rx and continue transferring data.
-	if(stream_data->transfer_status[stream_data->i] != TRANSFER_AVAIL)
-		return error_conv(-99);
-	//assert(stream_data->transfer_status[stream_data->i] == TRANSFER_AVAIL);
-	
-	transfer = stream_data->transfers[stream_data->i];
+    transfer = get_next_available_transfer(stream_data);
+    assert(transfer != NULL);
 
     assert(bytes_per_buffer <= INT_MAX);
     libusb_fill_bulk_transfer(transfer,
@@ -862,6 +1098,7 @@ static int lusb_init_stream(void *driver, struct bladerf_stream *stream,
     stream_data->num_transfers = num_transfers;
     stream_data->num_avail = 0;
     stream_data->i = 0;
+    stream_data->out_of_order_event = false;
 
     stream_data->transfers =
         malloc(num_transfers * sizeof(struct libusb_transfer *));
@@ -1070,7 +1307,9 @@ static const struct usb_fns libusb_fns = {
     FIELD_INIT(.init_stream, lusb_init_stream),
     FIELD_INIT(.stream, lusb_stream),
     FIELD_INIT(.submit_stream_buffer, lusb_submit_stream_buffer),
-    FIELD_INIT(.deinit_stream, lusb_deinit_stream)
+    FIELD_INIT(.deinit_stream, lusb_deinit_stream),
+    FIELD_INIT(.open_bootloader, lusb_open_bootloader),
+    FIELD_INIT(.close_bootloader, lusb_close_bootloader),
 };
 
 const struct usb_driver usb_driver_libusb = {

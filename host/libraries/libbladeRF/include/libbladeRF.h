@@ -3,7 +3,7 @@
  *
  * @brief bladeRF library
  *
- * Copyright (C) 2013 Nuand LLC
+ * Copyright (C) 2013-2014 Nuand LLC
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,11 +23,19 @@
 #define BLADERF_H_
 
 #include <stdint.h>
-#include <stdbool.h>
 #include <stdlib.h>
 
 #ifdef __cplusplus
 extern "C" {
+#else
+/* stdbool.h is not applicable for C++ programs, as the language inherently
+ * provides the bool type.
+ *
+ * Users of Visual Studio 2012 and earlier will need to supply a stdbool.h
+ * implementation, as it is not included with the toolchain. One is provided
+ * with the bladeRF source code. Visual Studio 2013 onward supplies this header.
+ */
+#include <stdbool.h>
 #endif
 
 #if defined _WIN32 || defined __CYGWIN__
@@ -241,6 +249,22 @@ int CALL_CONV bladerf_open(struct bladerf **device,
 API_EXPORT
 void CALL_CONV bladerf_close(struct bladerf *device);
 
+/**
+ * Enable or disable USB device reset operation upon opening a device for
+ * future bladerf_open() and bladerf_open_with_devinfo() calls.
+ *
+ * This operation has been found to be necessary on Linux-based systems for
+ * some USB 3.0 controllers on Linux.
+ *
+ * This <b>does not</b> reset the state of the device in terms of its frequency,
+ * gain, samplerate, etc. settings.
+ *
+ * @param   enabled     Set true to enable the use of the USB device reset,
+ *                      and false otherwise.
+ */
+API_EXPORT
+void bladerf_set_usb_reset_on_open(bool enabled);
+
 /** @} (End FN_INIT) */
 
 /**
@@ -380,7 +404,7 @@ const char * CALL_CONV bladerf_backend_str(bladerf_backend backend);
 #define BLADERF_BANDWIDTH_MAX       28000000u
 
 /** Minimum tunable frequency (without an XB-200 attached), in Hz */
-#define BLADERF_FREQUENCY_MIN       232500000u
+#define BLADERF_FREQUENCY_MIN       237500000u
 
 /**
  * Minimum tunable frequency (with an XB-200 attached), in HZ.
@@ -861,20 +885,6 @@ API_EXPORT
 int CALL_CONV bladerf_get_txvga1(struct bladerf *dev, int *gain);
 
 /**
- * Set a combined VGA TX gain
- *
- * This function computes the optimal TXVGA1 and TXVGA2 gains for a requested
- * amount of gain
- *
- * @param       dev         Device handle
- * @param       gain        Desired gain
- *
- * @return 0 on success, value from \ref RETCODES list on failure
- */
-API_EXPORT
-int CALL_CONV bladerf_set_tx_gain(struct bladerf *dev, int gain);
-
-/**
  * Set the LNA gain
  *
  * @param       dev         Device handle
@@ -943,11 +953,13 @@ API_EXPORT
 int CALL_CONV bladerf_get_rxvga2(struct bladerf *dev, int *gain);
 
 /**
- * Set a combined pre and post LPF RX gain
+ * Set combined gain values
  *
  * This function computes the optimal LNA, RXVGA1, and RVGA2 gains for a
  * requested amount of RX gain, and computes the optimal TXVGA1 and TXVGA2 gains
- * for a requested amount of TX gain
+ * for a requested amount of TX gain.
+ *
+ * Values outside the valid gain range will be clipped.
  *
  * @param       dev         Device handle
  * @param       mod         Module
@@ -1246,6 +1258,15 @@ typedef enum {
 /**
  * Mark the associated buffer as the start of a burst transmission.
  * This is only used for the bladerf_sync_tx() call.
+ *
+ * When using this flag, the bladerf_metadata::timestamp field should contain
+ * the timestamp at which samples should be sent.
+ *
+ * Between specifying the ::BLADERF_META_FLAG_TX_BURST_START and
+ * ::BLADERF_META_FLAG_TX_BURST_END flags, there is no need for the user to the
+ * bladerf_metadata::timestamp field because the library will ensure the
+ * correct value is used, based upon the timestamp initially provided and
+ * the number of samples that have been sent.
  */
 #define BLADERF_META_FLAG_TX_BURST_START   (1 << 0)
 
@@ -1293,6 +1314,26 @@ typedef enum {
 #define BLADERF_META_FLAG_TX_NOW           (1 << 2)
 
 /**
+ * Use this flag within a burst (i.e., between the use of
+ * ::BLADERF_META_FLAG_TX_BURST_START and ::BLADERF_META_FLAG_TX_BURST_END) to
+ * specify that bladerf_sync_tx() should read the bladerf_metadata::timestamp
+ * field and zero-pad samples up to the specified timestamp. The provided
+ * samples will then be transmitted at that timestamp.
+ *
+ * Use this flag when potentially flushing an entire buffer via the
+ * ::BLADERF_META_FLAG_TX_BURST_END would yield an unacceptably large gap in
+ * the transmitted samples.
+ *
+ * In some applications where a transmitter is constantly transmitting
+ * with extremely small gaps (less than a buffer), users may end up using a
+ * single ::BLADERF_META_FLAG_TX_BURST_START, and then numerous calls to
+ * bladerf_sync_tx() with the ::BLADERF_META_FLAG_TX_UPDATE_TIMESTAMP
+ * flag set.  The ::BLADERF_META_FLAG_TX_BURST_END would only be used to end
+ * the stream when shutting down.
+ */
+#define BLADERF_META_FLAG_TX_UPDATE_TIMESTAMP (1 << 3)
+
+/**
  * This flag indicates that calls to bladerf_sync_rx should return any available
  * samples, rather than wait until the timestamp indicated in the
  * bladerf_metadata timestamp field.
@@ -1320,7 +1361,8 @@ struct bladerf_metadata {
      *
      * Valid flags include
      *  ::BLADERF_META_FLAG_TX_BURST_START, ::BLADERF_META_FLAG_TX_BURST_END,
-     *  ::BLADERF_META_FLAG_TX_NOW, and ::BLADERF_META_FLAG_RX_NOW
+     *  ::BLADERF_META_FLAG_TX_NOW, ::BLADERF_META_FLAG_TX_UPDATE_TIMESTAMP,
+     *  and ::BLADERF_META_FLAG_RX_NOW
      *
      */
     uint32_t flags;
@@ -1873,7 +1915,10 @@ typedef enum {
  * Query a device's serial number
  *
  * @param[in]   dev     Device handle
- * @param[out]  serial  Will be updated with serial number. If an error occurs,
+ * @param[out]  serial  This user-supplied buffer, which <b>must be at least
+ *                      ::BLADERF_SERIAL_LENGTH bytes</b>, will be updated to
+ *                      contain a NUL-terminated serial number string. If an
+ *                      error occurs (as indicated by a non-zero return value),
  *                      no data will be written to this pointer.
  *
  * @return 0 on success, value from \ref RETCODES list on failure
@@ -2164,9 +2209,9 @@ struct bladerf_image {
      * Serial number of the device that the image was obtained from. This
      * field should be all '\0' if irrelevant.
      *
-     * Note that an extra character is added to store a NUL-terminator,
-     * to allow this field to be printed. This NUL-terminator is *NOT*
-     * written in the serialized image.
+     * The +1 here is actually extraneous; BLADERF_SERIAL_LENGTH already
+     * accounts for a NUL terminator. However, this is left here to avoid
+     * breaking backwards compatibility.
      */
     char serial[BLADERF_SERIAL_LENGTH + 1];
 
@@ -2491,7 +2536,7 @@ int CALL_CONV bladerf_lms_get_dc_cals(struct bladerf *dev,
  * when the device is not connected at Super Speed (i.e., when
  * it is connected at High Speed).
  *
- * However, the caller need not set this in gpio_set() calls.
+ * However, the caller need not set this in bladerf_config_gpio_write() calls.
  * The library will set this as needed; callers generally
  * do not need to be concerned with setting/clearing this bit.
  */
@@ -2901,6 +2946,71 @@ int CALL_CONV bladerf_write_flash(struct bladerf *dev, const uint8_t *buf,
 
 /** @} (End of FN_FLASH) */
 
+/**
+ * @defgroup FN_BOOTLOADER  Bootloader Recovery
+ *
+ * These functions provide the ability to identify devices enumerating as an
+ * FX3 bootloader, download firmware to RAM, and then execute the firmware.
+ *
+ * Care should be taken to ensure that devices operated on are indeed a bladeRF,
+ * as opposed to another FX3-based device running in bootloader mode.
+ * @{
+ */
+
+/**
+ * Get a list of devices that are running the FX3 bootloader.
+ *
+ * After obtaining this list, identify the device that you would like to load
+ * firmware onto. Save the bus and address values so that you can provide them
+ * to bladerf_load_fw_from_bootloader(), and then free this list via
+ * bladerf_free_device_list().
+ *
+ * @param[out]   list    Upon finding devices, this will be updated to point
+ *                       to a list of bladerf_devinfo structures that
+ *                       describe the identified devices.
+ *
+ * @return Number of items populated in `list`,
+ *         or an error value from the \ref RETCODES list on failure
+ */
+API_EXPORT
+int CALL_CONV bladerf_get_bootloader_list(struct bladerf_devinfo **list);
+
+/**
+ * Download firmware to the specified device that is enumarating an FX3
+ * bootloader, and begin executing the firmware from RAM.
+ *
+ * Note that this function <b>does not</b> write the firmware to SPI flash.
+ * If this is desired, open the newly enumerated device with bladerf_open() and
+ * use bladerf_flash_firmware().
+ *
+ * @param device_identifier   Device identifier string describing the
+ *                            backend to use via the
+ *                              `<backend>:device=<bus>:<addr>` syntax.
+ *                            If this is NULL, the backend, bus, and addr
+ *                            arguments will be used instead.
+ *
+ * @param backend             Backend to use. This is only used if
+ *                              device_identifier is NULL.
+ *
+ * @param bus                 Bus number the device is located on. This is only
+ *                              used if device_identifier is NULL.
+ *
+ * @param addr                Bus address the device is located on. This is only
+ *                              used if device_identifier is NULL.
+ *
+ * @param file                Filename of the firmware image to boot
+ *
+ * @return 0 on success, value from \ref RETCODES list on failure
+ *
+ *
+ */
+API_EXPORT
+int CALL_CONV bladerf_load_fw_from_bootloader(const char *device_identifier,
+                                              bladerf_backend backend,
+                                              uint8_t bus, uint8_t addr,
+                                              const char *file);
+
+/** @} (End of FN_BOOTLOADER) */
 
 #ifdef __cplusplus
 }

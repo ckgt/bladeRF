@@ -29,8 +29,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <math.h>
+#include <inttypes.h>
 #include <libbladeRF.h>
 #include "example_common.h"
 
@@ -236,7 +235,6 @@ int main(int argc, char *argv[])
     dev = example_init(devstr);
     if (dev) {
 
-        option = 0;
         do {
             printf("Enter (s) for (s)cheduled transmissions, "
                     "or (n) to use the (n)ow flag.\n");

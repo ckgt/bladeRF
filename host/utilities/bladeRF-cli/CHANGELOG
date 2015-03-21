@@ -5,6 +5,63 @@ For more detailed information, please see the git change log and issue tracker
 hosted on GitHub: https://github.com/nuand/bladeRF
 ================================================================================
 
+v1.1.2 (2015-02-28)
+--------------------------------
+This version depends upon libbladeRF v1.2.1.
+
+ * Fixed and improved help text and manual page generation.The doc generation
+   scripts should now be compatible with formats used by pandoc 1.12.x and
+   1.13.x.
+
+v1.1.1 (2015-01-31)
+--------------------------------
+This version depends upon libbladeRF v1.2.0.
+
+ * Updated LMS bit definitions for 'peek/poke lms' commands to include bits
+   previously marked "spare."
+
+ * Fixed a documentation build issue caused by help2man usage.
+
+
+v1.1.0 (2014-12-23)
+--------------------------------
+This version depends upon libbladeRF v1.1.0.
+
+ * The -p/--probe command line option now causes bladeRF-cli to return a
+    non-zero return value if no devices are found. This is intended to allow
+    shell scripts to easily check if devices are (not) present.
+
+ * The 'probe' command now takes an optional 'strict' argument to specify that
+    the lack of any identified devices should be treated as an error, which
+    would cause scripts or a list of '-e' command line arguments to terminate
+    immediately.
+
+ * Before entering interactive mode, script parsing, or '-e' option execution,
+    bladeRF-cli now searches for devices in bootloader modes and prompts the
+    user to run 'help recover' for instructions on loading firmware onto these
+    devices. This replaces the [INFO] log message previously printed by
+    lower-level libbladeRF code.
+
+v1.0.0 (2014-11-29)
+--------------------------------
+This version depends upon libbladeRF v1.0.0.
+
+ * Major version number incremented.
+    * This denotes that no further reverse-incompatible command changes shall be
+      introduced without a change to the major version number.
+
+
+v0.12.0 (2014-10-30)
+--------------------------------
+This version depends upon libbladeRF v0.17.0.
+
+ * Migrated rx/tx commands to libbladeRF's synchronous interface
+ * Introduced support of '#' line comments
+ * Changed argument order of xb command to be more intuitive
+ * Cleaned up help text and addressed discrepancies between help text and
+    associated commands
+ * Misc. minor bug fixes.
+
 v0.11.1 (2014-07-24)
 --------------------------------
 This version depends upon libbladeRF v0.16.2.
