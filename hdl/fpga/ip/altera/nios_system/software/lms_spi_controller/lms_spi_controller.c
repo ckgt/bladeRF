@@ -45,8 +45,8 @@
 #include "sys/alt_irq.h"
 
 #include "fifo.h"
-//#include "uart_packet_router.h"
-//#include "uart_state_machine.h"
+
+
 
 #define LMS_READ            0
 #define LMS_WRITE           (1<<7)
@@ -87,6 +87,8 @@
 #define PHASE_OFFSET 16
 #define DEFAULT_CORRECTION ( (DEFAULT_PHASE_CORRECTION << PHASE_OFFSET)|  (DEFAULT_GAIN_CORRECTION << GAIN_OFFSET))
 
+
+#define _1_WIRE_DS2411_FAMILY_CODE (0x01)
 
 
 void xb_gps_uart_write( uint8_t val ) ;
@@ -178,7 +180,7 @@ void adf4351_write( uint32_t val ) {
     sval.byte[1] = sval.byte[2];
     sval.byte[2] = t;
 
-    alt_avalon_spi_command( SPI_1_BASE, 1, 4, &(sval.val), 0, 0, 0 ) ;
+    alt_avalon_spi_command( SPI_1_BASE, 1, 4, (const alt_u8*)&(sval.val), 0, 0, 0 ) ;
     return ;
 }
 
@@ -316,7 +318,9 @@ void lms_spi_write( uint8_t address, uint8_t val )
     return;
 }
 
-// nsamp must be within 0-127. Note: 80mhz clock will overflow in 53 sec.
+// nsamp must be within 0-127.
+// Note: Max counter value is 0xFFFFFFFF or 4,294,967,295.
+// 80mhz clock will overflow in 53 sec.
 void gps_calibration_start(uint32_t nsamp){
 
 	// config register  { 7 6 5 4 3 2 1 0 }
@@ -335,10 +339,12 @@ void gps_calibration_start(uint32_t nsamp){
 
 }
 
+// Value needs to be cached to maintain returned value over the 4 byte read cycle
+static uint32_t gps_calibration_counter_cached = 0;
+
 // Returns 0 when counting, and # > 0 when complete.
-static uint32_t gps_calibration_counter = 0;
-void gps_calibration_monitor(){
-	gps_calibration_counter = IORD_ALTERA_AVALON_PIO_DATA(PIO_3_BASE);
+uint32_t gps_calibration_read(){
+	return IORD_ALTERA_AVALON_PIO_DATA(PIO_3_BASE);
 }
 
 
@@ -353,9 +359,9 @@ void xb_1wire_read_ROM(){
 	    sprintf(xb_ROM_data, "%%AQ_%d", owGetErrorNum());
 	    return;
 	}
-	#define _1_WIRE_DS2411_FAMILY_CODE (0x01)
-	int found = FindDevices(0, xb_ROM_data, _1_WIRE_DS2411_FAMILY_CODE, 1);
-	#undef _1_WIRE_DS2411_FAMILY_CODE
+
+	int found = FindDevices(0, (uint8_t (*)[8])&xb_ROM_data, _1_WIRE_DS2411_FAMILY_CODE, 1);
+
 
 	if(!found){
 	     sprintf(xb_ROM_data, "%%FD_%d", owGetErrorNum());
@@ -375,12 +381,6 @@ uint8_t read_ROM_byte_at(uint8_t index){
 
 
 
-void init_uart_FSM(){
-
-};
-void init_xpress_uart(){
-
-};
 
 #define UART_PKT_MAGIC          'N'
 #define UART_EXPRESS_PKT_MAGIC 'X'
@@ -512,30 +512,28 @@ void write_uart(unsigned char val) {
 // Entry point
 int main()
 {
-  debug("\r\n[NIOS POWER ON]");
+  //debug("\r\n[NIOS POWER ON]");
+
+
+
+
+
+
+
+  // start comm interface with Cypress USB controller and Lime Chip
+  init_NIOS();
+
+  //--read the RF board serial number
+  // Get the current serial code/ROM data from the 1wire DS2411
+  // Because the cypress uart -> nios is fifo buffered, any commands from the host
+  // should just get buffered while the serial loads, then when this returns
+  // the host commands should get processed quickly.
+  xb_1wire_read_ROM();
 
 
   // initialize fifo GPS uart buffer
   uint8_t uart_buffer[XB_UART_FIFO_BUFFER_SIZE] = {0};
   uf = fifo_new(uart_buffer, sizeof(uart_buffer));
-
-
-/*
-  char* msg = "<< NIOS OK >>\r\n";
-  int jj = 0;
-  while(msg[jj++] != 0){
-	  fifo_enqueue(&uf,msg[jj-1]);
-  }
-*/
-
-
-
-  //--read the RF board serial number
-  // get the current serial code/ROM data from the 1wire DS2411
-  xb_1wire_read_ROM();
-
-  // start comm interface with Cypress USB controller and Lime Chip
-  init_NIOS();
 
 
   /* Event loop never exits. */
@@ -556,14 +554,13 @@ int main()
       uint32_t iovar = 0;
 
       uint32_t uart_hasdata_cached = 0;
-      uint32_t gps_calibration_counter_cached = 0;
+
 
 
       state = LOOKING_FOR_MAGIC;
       while(1)
       {
 		  monitor_xb_uart(0);
-		  gps_calibration_monitor();
 
 
           // Check if anything is in the FSK UART
@@ -574,7 +571,6 @@ int main()
               int isWrite;
 
               val = IORD_FIFOED_AVALON_UART_RXDATA(UART_0_BASE) ;
-
 
               // when a "magic is found, a specific behavior - parsing the following data as uart commands - ensues until set back to LOOKING
               switch (state) {
@@ -719,7 +715,9 @@ int main()
                             	cmd_ptr->data = (IORD_ALTERA_AVALON_PIO_DATA(IQ_CORR_TX_PHASE_GAIN_BASE)) >> ((cmd_ptr->addr + 2) * 8);
                             else if (device == GDEV_XB_GPS_CALIBRATION_READ){
                             	if(cmd_ptr->addr == 0){
-                            		gps_calibration_counter_cached = gps_calibration_counter;
+                            		// read the latest value and store in gps_calibration_counter
+                            		// cache the value that was obtained
+                            		gps_calibration_counter_cached = gps_calibration_read();
                             	}
 								cmd_ptr->data = (gps_calibration_counter_cached >> (cmd_ptr->addr * 8)) & 0xff;
                             }
