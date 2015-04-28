@@ -354,16 +354,19 @@ void xb_1wire_read_ROM(){
 	 sprintf(xb_ROM_data, "        ");
 
 	// attempt to acquire the 1-Wire Net
-	if (!owAcquire(0,0))
+	int port = 0;
+	if (!owAcquire(port,0))
 	{
 	    sprintf(xb_ROM_data, "%%AQ_%d", owGetErrorNum());
 	    return;
 	}
 
-	int found = FindDevices(0, (uint8_t (*)[8])&xb_ROM_data, _1_WIRE_DS2411_FAMILY_CODE, 1);
+	int found = FindDevices(port, (uint8_t (*)[8])&xb_ROM_data, _1_WIRE_DS2411_FAMILY_CODE, 1);
 
 
-	if(!found){
+	if(found){
+		owRelease(port);
+	} else {
 	     sprintf(xb_ROM_data, "%%FD_%d", owGetErrorNum());
 	     return;
 	}
